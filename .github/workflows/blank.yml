@@ -32,8 +32,8 @@ jobs:
       - name: 运行签到脚本
         env:
           # 基本账号
-          USER: ${{ secrets.USER }}
-          PASS: ${{ secrets.PASS }}
+          USER: yhe
+          PASS: hy248624
           
           # 额外账号1-5
           USER1: ${{ secrets.USER1 }}
