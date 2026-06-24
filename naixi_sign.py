@@ -25,10 +25,6 @@ def get_env(name: str, default: str = "") -> str:
 
 
 def load_notify():
-    """
-    兼容原 NodeSeek-Signin 项目里的 notify.py。
-    如果不存在 notify.py，也不会影响签到。
-    """
     try:
         from notify import send
         return send
@@ -37,19 +33,11 @@ def load_notify():
 
 
 def extract_cdata_or_text(raw_text: str) -> str:
-    """
-    k_misign 的 format=empty 可能返回 XML，例如：
-    <?xml version="1.0" encoding="utf-8"?>
-    <root><![CDATA[今日已签]]></root>
-
-    这里尽量提取真正有用的文本。
-    """
     if not raw_text:
         return ""
 
     text = raw_text.strip()
 
-    # 优先按 XML 解析
     if text.startswith("<?xml") or text.startswith("<root"):
         try:
             root = ET.fromstring(text)
@@ -58,21 +46,15 @@ def extract_cdata_or_text(raw_text: str) -> str:
         except Exception:
             pass
 
-    # XML 解析失败时，用正则兜底提取 CDATA
     cdata_match = re.search(r"<!\[CDATA\[(.*?)\]\]>", text, re.S)
     if cdata_match:
         return html.unescape(cdata_match.group(1).strip())
 
-    # 去掉简单 HTML 标签，方便后续关键词判断
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text.strip())
 
 
 def get_formhash(session: requests.Session) -> str:
-    """
-    优先从环境变量 NAIXI_FORMHASH 读取；
-    若未配置，则访问签到页自动提取 formhash。
-    """
     env_formhash = get_env("NAIXI_FORMHASH")
     if env_formhash:
         return env_formhash
@@ -84,8 +66,8 @@ def get_formhash(session: requests.Session) -> str:
 
     patterns = [
         r"formhash=([a-fA-F0-9]{8})",
-        r'name=["\']formhash["\']\s+value=["\']([a-fA-F0-9]{8})["\']',
-        r"value=["\']([a-fA-F0-9]{8})["\']\s+name=["\']formhash["\']",
+        r"name=['\"]formhash['\"]\s+value=['\"]([a-fA-F0-9]{8})['\"]",
+        r"value=['\"]([a-fA-F0-9]{8})['\"]\s+name=['\"]formhash['\"]",
         r"formhash['\"]?\s*[:=]\s*['\"]([a-fA-F0-9]{8})",
     ]
 
@@ -98,12 +80,6 @@ def get_formhash(session: requests.Session) -> str:
 
 
 def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[bool, str]:
-    """
-    根据 HTTP 状态码和接口返回内容判断签到结果。
-    返回：
-    - bool: 是否视为成功
-    - str: 日志消息
-    """
     cleaned_text = extract_cdata_or_text(raw_text)
 
     preview = cleaned_text or raw_text.strip()
@@ -135,14 +111,13 @@ def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[b
         "请先登录",
         "未登录",
         "需要登录",
-        "login",
         "member.php?mod=logging",
     ]
 
     formhash_fail_keywords = [
-        "formhash",
         "请求来路不正确",
         "提交请求来路不正确",
+        "formhash",
     ]
 
     fail_keywords = [
@@ -172,11 +147,9 @@ def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[b
     if any(keyword in preview for keyword in fail_keywords) or "error" in lower_preview:
         return False, f"账号{index}: 签到失败，返回: {preview}"
 
-    # 有些 Discuz 插件成功时可能返回空内容
     if not cleaned_text and not raw_text.strip():
         return True, f"账号{index}: 签到请求完成，服务器返回空内容"
 
-    # 无法明确判断时，不直接判失败，避免误报
     return True, f"账号{index}: 签到请求完成，返回: {preview}"
 
 
@@ -205,18 +178,6 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
 
 
 def split_cookies(cookie_raw: str) -> list[str]:
-    """
-    支持两种多账号写法：
-
-    1. 换行分隔：
-       cookie1
-       cookie2
-
-    2. 使用 & 分隔：
-       cookie1&cookie2
-
-    注意：如果你的 Cookie 本身包含特殊 & 字符，更推荐使用换行分隔。
-    """
     cookies = []
 
     for line in cookie_raw.splitlines():
@@ -224,7 +185,6 @@ def split_cookies(cookie_raw: str) -> list[str]:
         if not line:
             continue
 
-        # 兼容旧写法：用 & 分隔多个 cookie
         parts = [part.strip() for part in line.split("&") if part.strip()]
         cookies.extend(parts)
 
@@ -286,7 +246,6 @@ def main():
         except Exception as e:
             print(f"发送通知失败: {e}")
 
-    # 只有全部失败时，才让 GitHub Actions 显示失败
     if ok_count == 0:
         sys.exit(1)
 
