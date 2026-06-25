@@ -10,6 +10,7 @@ from playwright.sync_api import sync_playwright
 
 
 BASE_URL = "https://www.nodeloc.com/"
+LOGIN_BUTTON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[3]/span/span/button'
 CHECKIN_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[3]/ul/li[2]/button'
 CHECKIN_BUTTON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button'
 CHECKIN_ICON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button/svg'
@@ -119,6 +120,13 @@ def has_signed_text(page) -> bool:
 
 def has_login_prompt(page) -> bool:
     try:
+        login_button = page.locator(f"xpath={LOGIN_BUTTON_XPATH}")
+        if login_button.count() > 0 and login_button.first.is_visible(timeout=2000):
+            return True
+    except Exception:
+        pass
+
+    try:
         body_text = page.locator("body").inner_text(timeout=5000)
     except Exception:
         return False
@@ -126,7 +134,40 @@ def has_login_prompt(page) -> bool:
     return any(keyword in body_text for keyword in LOGIN_KEYWORDS)
 
 
+def get_current_user(page) -> tuple[bool, str]:
+    try:
+        result = page.evaluate(
+            """async () => {
+                const response = await fetch('/session/current.json', {
+                    credentials: 'include',
+                    headers: { 'accept': 'application/json' }
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (e) {
+                    data = null;
+                }
+                return { status: response.status, data };
+            }"""
+        )
+        data = result.get("data") if isinstance(result, dict) else None
+        current_user = data.get("current_user") if isinstance(data, dict) else None
+        if current_user:
+            username = current_user.get("username") or current_user.get("name") or "unknown"
+            return True, str(username)
+    except Exception:
+        pass
+
+    return False, ""
+
+
 def is_logged_in(page) -> bool:
+    ok, _ = get_current_user(page)
+    if ok:
+        return True
+
     try:
         body_text = page.locator("body").inner_text(timeout=5000)
         if any(keyword in body_text for keyword in LOGGED_IN_KEYWORDS):
@@ -286,10 +327,18 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 
             context.add_cookies(parsed_cookies)
             page = context.new_page()
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            page.goto(BASE_URL, wait_until="commit", timeout=60000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except PlaywrightTimeoutError:
+                pass
             page.wait_for_timeout(10000)
 
-            if not is_logged_in(page):
+            if has_login_prompt(page):
+                return "failed", f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮"
+
+            logged_in, username = get_current_user(page)
+            if not logged_in:
                 return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
 
             checkin_button, hint_text = find_checkin_target(page)
@@ -321,7 +370,7 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 
             return "failed", f"账号{index}: 已点击签到按钮，但未确认签到成功"
     except PlaywrightTimeoutError:
-        return "failed", f"账号{index}: NodeLoc 签到按钮等待超时，可能 Cookie 失效或页面未登录"
+        return "failed", f"账号{index}: NodeLoc 页面加载或按钮等待超时，可能 Cookie 失效或页面未登录"
     except Exception as e:
         return "failed", f"账号{index}: NodeLoc 签到异常: {e}"
     finally:
