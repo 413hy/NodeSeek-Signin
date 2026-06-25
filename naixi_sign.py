@@ -19,6 +19,20 @@ SIGN_API = (
 )
 
 
+DIGIT_CLASS_MAP = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
+
+
 def get_env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     return value.strip() if value else default
@@ -32,6 +46,14 @@ def load_notify():
         return None
 
 
+def strip_tags(text: str) -> str:
+    text = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.S | re.I)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def extract_cdata_or_text(raw_text: str) -> str:
     if not raw_text:
         return ""
@@ -43,6 +65,7 @@ def extract_cdata_or_text(raw_text: str) -> str:
             root = ET.fromstring(text)
             if root.text:
                 return html.unescape(root.text.strip())
+            return ""
         except Exception:
             pass
 
@@ -50,8 +73,89 @@ def extract_cdata_or_text(raw_text: str) -> str:
     if cdata_match:
         return html.unescape(cdata_match.group(1).strip())
 
-    text = re.sub(r"<[^>]+>", "", text)
-    return html.unescape(text.strip())
+    return strip_tags(text)
+
+
+def decode_digit_spans(fragment: str) -> str:
+    """
+    奶昔论坛页面里的积分数字可能不是文本，而是这种形式：
+
+    <span class="three"></span>
+    <span class="five"></span>
+
+    这代表 35。
+    """
+    digits = []
+
+    span_pattern = re.compile(
+        r"<span\b[^>]*class=['\"]([^'\"]+)['\"][^>]*>(.*?)</span>",
+        flags=re.S | re.I,
+    )
+
+    for class_value, inner_text in span_pattern.findall(fragment):
+        classes = class_value.split()
+
+        found_digit = None
+        for cls in classes:
+            if cls in DIGIT_CLASS_MAP:
+                found_digit = DIGIT_CLASS_MAP[cls]
+                break
+
+            # 兼容 num3、digit3 这种类名
+            number_match = re.search(r"(\d)", cls)
+            if number_match:
+                found_digit = number_match.group(1)
+                break
+
+        if found_digit is not None:
+            digits.append(found_digit)
+            continue
+
+        text = strip_tags(inner_text)
+        if text.isdigit():
+            digits.append(text)
+
+    return "".join(digits)
+
+
+def extract_points_from_sign_page(page_text: str) -> tuple[str, str]:
+    """
+    从签到页面提取积分/数字统计。
+
+    优先找包含“积分”的 li。
+    如果找不到，就回退到页面里第 3 个带数字 span 的 li，
+    对应你给的 XPath 里 li[3] 的思路。
+    """
+    li_blocks = re.findall(r"<li\b[^>]*>(.*?)</li>", page_text, flags=re.S | re.I)
+
+    candidates = []
+
+    for li in li_blocks:
+        if "<span" not in li:
+            continue
+
+        number = decode_digit_spans(li)
+        if not number:
+            continue
+
+        label = strip_tags(li)
+        candidates.append((label, number, li))
+
+    for label, number, _ in candidates:
+        if "积分" in label:
+            return number, label
+
+    # 回退：取第 3 个带数字 span 的统计项
+    if len(candidates) >= 3:
+        label, number, _ = candidates[2]
+        return number, label
+
+    # 再回退：取第 1 个能识别出的数字
+    if candidates:
+        label, number, _ = candidates[0]
+        return number, label
+
+    return "", ""
 
 
 def get_formhash(session: requests.Session) -> str:
@@ -136,7 +240,7 @@ def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[b
     if any(keyword in preview for keyword in success_keywords) or any(
         keyword in lower_preview for keyword in ["success", "succeed"]
     ):
-        return True, f"账号{index}: 签到成功，返回: {preview}"
+        return True, f"账号{index}: 签到成功"
 
     if any(keyword in preview for keyword in login_fail_keywords) or "login" in lower_preview:
         return False, f"账号{index}: 签到失败，Cookie 可能失效或未登录，返回: {preview}"
@@ -149,6 +253,9 @@ def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[b
 
     if not cleaned_text and not raw_text.strip():
         return True, f"账号{index}: 签到请求完成，服务器返回空内容"
+
+    if not cleaned_text and raw_text.strip():
+        return True, f"账号{index}: 签到请求完成，接口返回空 CDATA"
 
     return True, f"账号{index}: 签到请求完成，返回: {preview}"
 
@@ -173,8 +280,24 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     sign_url = SIGN_API.format(formhash=formhash)
 
     resp = session.get(sign_url, timeout=30)
+    ok, message = classify_sign_result(resp.status_code, resp.text, index)
 
-    return classify_sign_result(resp.status_code, resp.text, index)
+    # 签到后重新访问签到页，获取积分
+    try:
+        page_resp = session.get(SIGN_PAGE, timeout=30)
+        page_resp.raise_for_status()
+
+        points, points_label = extract_points_from_sign_page(page_resp.text)
+
+        if points:
+            message = f"{message}，当前积分: {points}"
+        else:
+            message = f"{message}，未能从签到页解析到积分"
+
+    except Exception as e:
+        message = f"{message}，获取积分失败: {e}"
+
+    return ok, message
 
 
 def split_cookies(cookie_raw: str) -> list[str]:
