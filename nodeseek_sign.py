@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import re
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -211,28 +210,6 @@ def save_cookie_to_ql(var_name: str, cookie: str):
 # ---------------- Docker Cookie 文件保存 ----------------
 COOKIE_FILE_PATH = "./cookie/NS_COOKIE.txt"
 
-
-def parse_cookie_header(cookie_header: str) -> list[dict[str, str]]:
-    cookies = []
-
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-
-        name, value = part.split("=", 1)
-        name = name.strip()
-        if not name:
-            continue
-
-        cookies.append({
-            "name": name,
-            "value": value.strip(),
-            "url": "https://www.nodeseek.com/",
-        })
-
-    return cookies
-
 def save_cookie_to_file(cookie_str: str):
     """将Cookie保存到文件"""
     try:
@@ -400,126 +377,6 @@ def sign(ns_cookie, ns_random):
     except Exception as e:
         return "error", str(e)
 
-
-# ---------------- 查询总鸡腿函数 ----------------
-def format_total_chicken_value(text: str):
-    match = re.search(r"鸡腿\s*([0-9,]+)", text or "", flags=re.S)
-    if match:
-        return f"鸡腿 {match.group(1)}"
-
-    return None
-
-
-def extract_total_chicken_text(page_text: str):
-    match = re.search(
-        r'id=["\']nsk-right-panel-container["\'][\s\S]*?<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
-        page_text,
-        flags=re.S | re.I,
-    )
-    if match:
-        return f"鸡腿 {match.group(1)}"
-
-    return None
-
-
-def get_total_chicken_from_rendered_page(ns_cookie):
-    try:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
-    except Exception as e:
-        return None, f"Playwright 未可用，无法渲染页面读取总鸡腿数: {e}"
-
-    browser = None
-
-    try:
-        parsed_cookies = parse_cookie_header(ns_cookie)
-        if not parsed_cookies:
-            return None, "Cookie 为空或格式不正确"
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
-                ),
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai",
-            )
-            context.add_cookies(parsed_cookies)
-            page = context.new_page()
-            page.goto("https://www.nodeseek.com/board", wait_until="networkidle", timeout=60000)
-
-            xpath = '//*[@id="nsk-right-panel-container"]/div[1]/div[2]/div[1]/div[2]/a/span'
-            locator = page.locator(f"xpath={xpath}")
-            try:
-                locator.wait_for(state="visible", timeout=20000)
-                text = locator.inner_text(timeout=5000).strip()
-                if text:
-                    return text, "查询成功"
-            except PlaywrightTimeoutError:
-                pass
-
-            container = page.locator("#nsk-right-panel-container")
-            container.wait_for(state="visible", timeout=10000)
-            container_text = container.inner_text(timeout=5000)
-            total_chicken = format_total_chicken_value(container_text)
-            if total_chicken:
-                return total_chicken, "查询成功"
-
-            return None, "右侧面板中未解析到总鸡腿数"
-    except Exception as e:
-        return None, f"渲染页面查询异常: {str(e)}"
-    finally:
-        if browser:
-            try:
-                browser.close()
-            except Exception:
-                pass
-
-
-def get_total_chicken(ns_cookie):
-    """从右侧面板读取总鸡腿数。"""
-    if not ns_cookie:
-        return None, "无有效Cookie"
-
-    headers = {
-        'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
-        'origin': "https://www.nodeseek.com",
-        'referer': "https://www.nodeseek.com/board",
-        'Cookie': ns_cookie
-    }
-
-    try:
-        response, used_impersonate, req_err = _request_with_impersonate_fallback(
-            "GET", "https://www.nodeseek.com/board", headers=headers, json_data=None, timeout=25
-        )
-        if req_err is not None:
-            return None, f"请求异常: {req_err}"
-        if response is None:
-            return None, "请求失败：无响应"
-        if response.status_code == 403:
-            if _is_cloudflare_challenge(response.text):
-                return None, f"403 Cloudflare challenge (最后尝试 impersonate={used_impersonate})"
-            return None, f"403 Forbidden (impersonate={used_impersonate})"
-
-        total_chicken = extract_total_chicken_text(response.text)
-        if total_chicken:
-            return total_chicken, "查询成功"
-
-        return get_total_chicken_from_rendered_page(ns_cookie)
-    except Exception as e:
-        return None, f"查询异常: {str(e)}"
-
-
 # ---------------- 查询签到收益统计函数 ----------------
 def get_signin_stats(ns_cookie, days=30):
     """查询前days天内的签到收益统计"""
@@ -645,16 +502,7 @@ def print_signin_stats(stats, account_name):
     print(f"签到天数: {stats['days_count']} 天")
     print(f"总获得鸡腿: {stats['total_amount']} 个")
     print(f"平均每日鸡腿: {stats['average']} 个")
-
-
-def format_total_chicken_message(total_chicken, total_chicken_msg):
-    if total_chicken:
-        match = re.search(r"([0-9,]+)", str(total_chicken))
-        value = match.group(1) if match else str(total_chicken)
-        return f"总鸡腿数：{value}"
-
-    return f"总鸡腿数：查询失败（{total_chicken_msg}）"
-
+    
 
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
@@ -737,23 +585,17 @@ if __name__ == "__main__":
 
         if result in ["success", "already"]:
             print(f"账号 {display_user} 签到成功: {msg}")
-
+            
             print("正在查询签到收益统计...")
             stats, stats_msg = get_signin_stats(cookie, 30)
             if stats:
                 print_signin_stats(stats, display_user)
             else:
                 print(f"统计查询失败: {stats_msg}")
-
-            print("正在查询总鸡腿数...")
-            total_chicken, total_chicken_msg = get_total_chicken(cookie)
-            total_chicken_line = format_total_chicken_message(total_chicken, total_chicken_msg)
-            print(f"账号 {display_user} {total_chicken_line}")
-
+            
             if hadsend:
                 try:
                     notification_msg = f"账号 {display_user} 签到成功：{msg}"
-                    notification_msg += f"\n{total_chicken_line}"
                     if stats:
                         notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                     send("NodeSeek 签到", notification_msg)
@@ -771,25 +613,19 @@ if __name__ == "__main__":
                     if result in ["success", "already"]:
                         print(f"账号 {display_user} 签到成功: {msg}")
                         cookies_updated = True
-
+                        
                         print("正在查询签到收益统计...")
                         stats, stats_msg = get_signin_stats(new_cookie, 30)
                         if stats:
                             print_signin_stats(stats, display_user)
                         else:
                             print(f"统计查询失败: {stats_msg}")
-
-                        print("正在查询总鸡腿数...")
-                        total_chicken, total_chicken_msg = get_total_chicken(new_cookie)
-                        total_chicken_line = format_total_chicken_message(total_chicken, total_chicken_msg)
-                        print(f"账号 {display_user} {total_chicken_line}")
-
+                        
                         cookie_list[i] = new_cookie
-
+                        
                         if hadsend:
                             try:
                                 notification_msg = f"账号 {display_user} 签到成功：{msg}"
-                                notification_msg += f"\n{total_chicken_line}"
                                 if stats:
                                     notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                                 send("NodeSeek 签到", notification_msg)
