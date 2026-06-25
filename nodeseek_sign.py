@@ -637,7 +637,16 @@ def print_signin_stats(stats, account_name):
     print(f"签到天数: {stats['days_count']} 天")
     print(f"总获得鸡腿: {stats['total_amount']} 个")
     print(f"平均每日鸡腿: {stats['average']} 个")
-    
+
+
+def format_total_chicken_message(total_chicken, total_chicken_msg):
+    if total_chicken:
+        match = re.search(r"([0-9,]+)", str(total_chicken))
+        value = match.group(1) if match else str(total_chicken)
+        return f"总鸡腿数：{value}"
+
+    return f"总鸡腿数：查询失败（{total_chicken_msg}）"
+
 
 # ---------------- 主流程 ----------------
 if __name__ == "__main__":
@@ -730,16 +739,13 @@ if __name__ == "__main__":
 
             print("正在查询总鸡腿数...")
             total_chicken, total_chicken_msg = get_total_chicken(cookie)
-            if total_chicken:
-                print(f"账号 {display_user} 当前总鸡腿数: {total_chicken}")
-            else:
-                print(f"总鸡腿数查询失败: {total_chicken_msg}")
+            total_chicken_line = format_total_chicken_message(total_chicken, total_chicken_msg)
+            print(f"账号 {display_user} {total_chicken_line}")
 
             if hadsend:
                 try:
                     notification_msg = f"账号 {display_user} 签到成功：{msg}"
-                    if total_chicken:
-                        notification_msg += f"\n当前总鸡腿数：{total_chicken}"
+                    notification_msg += f"\n{total_chicken_line}"
                     if stats:
                         notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                     send("NodeSeek 签到", notification_msg)
@@ -767,18 +773,15 @@ if __name__ == "__main__":
 
                         print("正在查询总鸡腿数...")
                         total_chicken, total_chicken_msg = get_total_chicken(new_cookie)
-                        if total_chicken:
-                            print(f"账号 {display_user} 当前总鸡腿数: {total_chicken}")
-                        else:
-                            print(f"总鸡腿数查询失败: {total_chicken_msg}")
+                        total_chicken_line = format_total_chicken_message(total_chicken, total_chicken_msg)
+                        print(f"账号 {display_user} {total_chicken_line}")
 
                         cookie_list[i] = new_cookie
 
                         if hadsend:
                             try:
                                 notification_msg = f"账号 {display_user} 签到成功：{msg}"
-                                if total_chicken:
-                                    notification_msg += f"\n当前总鸡腿数：{total_chicken}"
+                                notification_msg += f"\n{total_chicken_line}"
                                 if stats:
                                     notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                                 send("NodeSeek 签到", notification_msg)

@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import html
+import time
 import xml.etree.ElementTree as ET
 
 import requests
@@ -33,6 +34,8 @@ DIGIT_CLASS_MAP = {
     "nine": "9",
 }
 
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+
 
 def get_env(name: str, default: str = "") -> str:
     value = os.getenv(name)
@@ -45,6 +48,57 @@ def load_notify():
         return send
     except Exception:
         return None
+
+
+def request_with_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    retries: int = 3,
+    timeout: int = 30,
+    **kwargs,
+) -> requests.Response:
+    last_response = None
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.request(method, url, timeout=timeout, **kwargs)
+            last_response = response
+            if response.status_code not in RETRY_STATUS_CODES:
+                return response
+
+            if attempt < retries:
+                wait_seconds = min(10 * attempt, 30)
+                print(
+                    f"请求 {url} 返回 HTTP {response.status_code}，"
+                    f"{wait_seconds} 秒后重试 {attempt}/{retries}",
+                    flush=True,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            return response
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < retries:
+                wait_seconds = min(10 * attempt, 30)
+                print(
+                    f"请求 {url} 异常: {e}，{wait_seconds} 秒后重试 {attempt}/{retries}",
+                    flush=True,
+                )
+                time.sleep(wait_seconds)
+                continue
+            raise
+
+    if last_response is not None:
+        return last_response
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError(f"请求 {url} 失败")
 
 
 def strip_tags(text: str) -> str:
@@ -213,7 +267,7 @@ def extract_total_credit_from_credit_page(page_text: str) -> str:
 
 
 def get_total_credit(session: requests.Session) -> str:
-    resp = session.get(CREDIT_PAGE, timeout=30)
+    resp = request_with_retry(session, "GET", CREDIT_PAGE)
     resp.raise_for_status()
     return extract_total_credit_from_credit_page(resp.text)
 
@@ -223,7 +277,7 @@ def get_formhash(session: requests.Session) -> str:
     if env_formhash:
         return env_formhash
 
-    resp = session.get(SIGN_PAGE, timeout=30)
+    resp = request_with_retry(session, "GET", SIGN_PAGE)
     resp.raise_for_status()
 
     page_text = resp.text
@@ -339,11 +393,11 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     formhash = get_formhash(session)
     sign_url = SIGN_API.format(formhash=formhash)
 
-    resp = session.get(sign_url, timeout=30)
+    resp = request_with_retry(session, "GET", sign_url)
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
 
     try:
-        page_resp = session.get(SIGN_PAGE, timeout=30)
+        page_resp = request_with_retry(session, "GET", SIGN_PAGE)
         page_resp.raise_for_status()
         today_points = extract_today_points_from_sign_page(page_resp.text)
 
