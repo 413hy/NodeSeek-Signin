@@ -26,7 +26,7 @@ jobs:
 
       - name: 安装依赖
         run: |
-          pip install playwright
+          pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
       - name: 随机等待到北京时间 08:00-10:00
