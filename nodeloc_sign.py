@@ -10,6 +10,8 @@ from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://www.nodeloc.com/"
 CHECKIN_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[3]/ul/li[2]/button'
+CHECKIN_BUTTON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button'
+CHECKIN_ICON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button/svg'
 CHECKIN_SELECTOR = ".checkin-button"
 ALREADY_SIGNED_TOOLTIP = "您今天已经签到过了"
 SIGNED_KEYWORDS = (
@@ -25,6 +27,10 @@ LOGIN_KEYWORDS = (
     "电子邮件或用户名",
     "请输入密码",
     "创建账户",
+)
+LOGGED_IN_KEYWORDS = (
+    "欢迎回来",
+    "Welcome back",
 )
 
 
@@ -93,6 +99,29 @@ def has_login_prompt(page) -> bool:
         return False
 
     return any(keyword in body_text for keyword in LOGIN_KEYWORDS)
+
+
+def is_logged_in(page) -> bool:
+    try:
+        body_text = page.locator("body").inner_text(timeout=5000)
+        if any(keyword in body_text for keyword in LOGGED_IN_KEYWORDS):
+            return True
+    except Exception:
+        pass
+
+    for selector in (
+        ".current-user",
+        ".header-dropdown-toggle.current-user",
+        ".user-menu",
+        ".user-menu-trigger",
+    ):
+        try:
+            if page.locator(selector).count() > 0:
+                return True
+        except Exception:
+            continue
+
+    return False
 
 
 def get_button_hint_text(page, button) -> str:
@@ -169,30 +198,41 @@ def is_checkin_button(button, hint_text: str) -> bool:
     )
 
 
-def find_checkin_button(page):
+def find_checkin_target(page):
     candidates = [
-        page.locator(CHECKIN_SELECTOR),
+        page.locator(f"xpath={CHECKIN_ICON_XPATH}"),
+        page.locator(f"xpath={CHECKIN_BUTTON_XPATH}"),
         page.locator(f"xpath={CHECKIN_XPATH}"),
+        page.locator(CHECKIN_SELECTOR),
     ]
 
     for candidate in candidates:
         if candidate.count() <= 0:
             continue
 
-        button = candidate.first
+        target = candidate.first
         try:
-            button.wait_for(state="visible", timeout=10000)
+            target.wait_for(state="visible", timeout=10000)
         except Exception:
             continue
 
-        hint_text = get_button_hint_text(page, button)
-        if is_checkin_button(button, hint_text):
-            return button, hint_text
+        hint_text = get_button_hint_text(page, target)
+        if not is_checkin_button(target, hint_text):
+            continue
+
+        try:
+            click_target = target.locator("xpath=ancestor-or-self::button[1]")
+            if click_target.count() > 0:
+                return click_target.first, hint_text
+        except Exception:
+            pass
+
+        return target, hint_text
 
     return None, ""
 
 
-def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
+def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
     browser = None
 
     try:
@@ -217,44 +257,48 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
 
             parsed_cookies = parse_cookie_header(cookie)
             if not parsed_cookies:
-                return False, f"账号{index}: Cookie 为空或格式不正确"
+                return "failed", f"账号{index}: Cookie 为空或格式不正确"
 
             context.add_cookies(parsed_cookies)
             page = context.new_page()
-            page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(10000)
 
-            checkin_button, hint_text = find_checkin_button(page)
+            if not is_logged_in(page):
+                return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
+
+            checkin_button, hint_text = find_checkin_target(page)
             if not checkin_button:
                 if has_login_prompt(page):
-                    return False, f"账号{index}: Cookie 已失效或未登录，页面要求登录"
+                    return "failed", f"账号{index}: Cookie 已失效或未登录，页面要求登录"
                 if has_signed_text(page):
-                    return True, f"账号{index}: NodeLoc 今日已签到"
-                return False, f"账号{index}: 未找到签到按钮，可能 Cookie 失效或页面未登录"
+                    return "already", f"账号{index}: NodeLoc 今日已签到"
+                return "failed", f"账号{index}: 未找到签到按钮，可能 Cookie 失效或页面未登录"
 
             if ALREADY_SIGNED_TOOLTIP in hint_text or "已经签到过了" in hint_text:
-                return True, f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
+                return "already", f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
 
             if has_login_prompt(page):
-                return False, f"账号{index}: Cookie 已失效或未登录，页面要求登录"
+                return "failed", f"账号{index}: Cookie 已失效或未登录，页面要求登录"
 
             checkin_button.click(timeout=30000)
             page.wait_for_timeout(5000)
 
             after_click_hint = get_button_hint_text(page, checkin_button)
             if ALREADY_SIGNED_TOOLTIP in after_click_hint or "已经签到过了" in after_click_hint:
-                return True, f"账号{index}: NodeLoc 签到成功"
+                return "already", f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
 
             if has_signed_text(page):
-                return True, f"账号{index}: NodeLoc 签到成功"
+                return "success", f"账号{index}: NodeLoc 签到成功"
 
             if has_login_prompt(page):
-                return False, f"账号{index}: Cookie 已失效或未登录，点击后页面要求登录"
+                return "failed", f"账号{index}: Cookie 已失效或未登录，点击后页面要求登录"
 
-            return False, f"账号{index}: 已点击签到按钮，但未确认签到成功"
+            return "failed", f"账号{index}: 已点击签到按钮，但未确认签到成功"
     except PlaywrightTimeoutError:
-        return False, f"账号{index}: NodeLoc 签到按钮等待超时，可能 Cookie 失效或页面未登录"
+        return "failed", f"账号{index}: NodeLoc 签到按钮等待超时，可能 Cookie 失效或页面未登录"
     except Exception as e:
-        return False, f"账号{index}: NodeLoc 签到异常: {e}"
+        return "failed", f"账号{index}: NodeLoc 签到异常: {e}"
     finally:
         if browser:
             try:
@@ -289,17 +333,27 @@ def main():
         sys.exit(1)
 
     results = []
-    ok_count = 0
+    success_count = 0
+    already_count = 0
+    failed_count = 0
 
     for index, cookie in enumerate(cookies, start=1):
-        ok, message = sign_one(cookie, index)
+        status, message = sign_one(cookie, index)
         print(message)
         results.append(message)
-        if ok:
-            ok_count += 1
+        if status == "success":
+            success_count += 1
+        elif status == "already":
+            already_count += 1
+        else:
+            failed_count += 1
 
     title = "NodeLoc 签到"
-    summary = f"完成：{ok_count}/{len(cookies)} 个账号成功或已签到\n\n" + "\n".join(results)
+    summary = (
+        f"成功：{success_count}，已签到：{already_count}，失败：{failed_count}，"
+        f"总计：{len(cookies)}\n\n"
+        + "\n".join(results)
+    )
 
     if send:
         try:
@@ -307,7 +361,7 @@ def main():
         except Exception as e:
             print(f"发送通知失败: {e}")
 
-    if ok_count == 0:
+    if failed_count > 0:
         sys.exit(1)
 
 
