@@ -10,6 +10,7 @@ import requests
 
 BASE_URL = "https://forum.naixi.net"
 SIGN_PAGE = f"{BASE_URL}/k_misign-sign.html"
+CREDIT_PAGE = f"{BASE_URL}/home.php?mod=spacecp&ac=credit&showcredit=1"
 SIGN_API = (
     f"{BASE_URL}/plugin.php"
     "?id=k_misign:sign"
@@ -188,6 +189,35 @@ def extract_total_points_from_sign_page(page_text: str) -> str:
     return ""
 
 
+def extract_total_credit_from_credit_page(page_text: str) -> str:
+    """
+    从总积分页面读取：
+    //*[@id="ct"]/div[1]/div/ul[2]/li[2]/text()
+    """
+    ct_match = re.search(
+        r"<div\b[^>]*id=['\"]ct['\"][^>]*>(.*)",
+        page_text,
+        flags=re.S | re.I,
+    )
+    scope = ct_match.group(1) if ct_match else page_text
+
+    ul_blocks = re.findall(r"<ul\b[^>]*>(.*?)</ul>", scope, flags=re.S | re.I)
+    if len(ul_blocks) < 2:
+        return ""
+
+    li_blocks = re.findall(r"<li\b[^>]*>(.*?)</li>", ul_blocks[1], flags=re.S | re.I)
+    if len(li_blocks) < 2:
+        return ""
+
+    return strip_tags(li_blocks[1])
+
+
+def get_total_credit(session: requests.Session) -> str:
+    resp = session.get(CREDIT_PAGE, timeout=30)
+    resp.raise_for_status()
+    return extract_total_credit_from_credit_page(resp.text)
+
+
 def get_formhash(session: requests.Session) -> str:
     env_formhash = get_env("NAIXI_FORMHASH")
     if env_formhash:
@@ -315,11 +345,9 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     try:
         page_resp = session.get(SIGN_PAGE, timeout=30)
         page_resp.raise_for_status()
+        today_points = extract_today_points_from_sign_page(page_resp.text)
 
-        page_text = page_resp.text
-
-        today_points = extract_today_points_from_sign_page(page_text)
-        total_points = extract_total_points_from_sign_page(page_text)
+        total_credit = get_total_credit(session)
 
         extra_parts = []
 
@@ -328,15 +356,15 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
         else:
             extra_parts.append("今日签到积分: 未解析到")
 
-        if total_points:
-            extra_parts.append(f"总积分: {total_points}")
+        if total_credit:
+            extra_parts.append(f"总积分: {total_credit}")
         else:
-            extra_parts.append("总积分: 未解析到")
+            extra_parts.append("总积分: 未能从总积分页解析到")
 
         message = f"{message}，" + "，".join(extra_parts)
 
     except Exception as e:
-        message = f"{message}，获取积分失败: {e}"
+        message = f"{message}，获取总积分失败: {e}"
 
     return ok, message
 

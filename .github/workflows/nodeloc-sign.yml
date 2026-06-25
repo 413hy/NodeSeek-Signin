@@ -1,18 +1,18 @@
-name: 奶昔论坛签到
+name: NodeLoc 签到
 
 on:
   push:
     branches:
       - main
   schedule:
-    - cron: '00 23 * * *'  # 北京时间 07:00 (UTC+8)，再随机等待 0-2 小时
+    - cron: '00 00 * * *'  # 北京时间 08:00 (UTC+8)，再随机等待 0-2 小时
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  run-naixi-sign:
+  run-nodeloc-sign:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,23 +26,22 @@ jobs:
 
       - name: 安装依赖
         run: |
-          pip install requests
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
-      - name: 随机等待到北京时间 07:00-09:00
+      - name: 随机等待到北京时间 08:00-10:00
         if: github.event_name == 'schedule'
         run: |
           delay=$(( RANDOM % 7201 ))
-          echo "随机等待 ${delay} 秒后执行奶昔签到"
+          echo "随机等待 ${delay} 秒后执行 NodeLoc 签到"
           sleep "$delay"
 
-      - name: 运行奶昔论坛签到脚本
+      - name: 运行 NodeLoc 签到脚本
         env:
-          NAIXI_COOKIE: ${{ secrets.NAIXI_COOKIE }}
-          # 可选：如果自动提取 formhash 失败，再手动配置这个
-          NAIXI_FORMHASH: ${{ secrets.NAIXI_FORMHASH }}
+          NODELOC_COOKIE: ${{ secrets.NODELOC_COOKIE || secrets.NL_COOKIE }}
 
           # 复用原项目 notify.py 的 Telegram 推送配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_USER_ID: ${{ secrets.TG_USER_ID }}
           TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
-        run: python naixi_sign.py
+        run: python nodeloc_sign.py

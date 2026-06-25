@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -377,6 +378,48 @@ def sign(ns_cookie, ns_random):
     except Exception as e:
         return "error", str(e)
 
+
+# ---------------- 查询总鸡腿函数 ----------------
+def get_total_chicken(ns_cookie):
+    """从右侧面板读取总鸡腿数。"""
+    if not ns_cookie:
+        return None, "无有效Cookie"
+
+    headers = {
+        'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+        'origin': "https://www.nodeseek.com",
+        'referer': "https://www.nodeseek.com/board",
+        'Cookie': ns_cookie
+    }
+
+    try:
+        response, used_impersonate, req_err = _request_with_impersonate_fallback(
+            "GET", "https://www.nodeseek.com/board", headers=headers, json_data=None, timeout=25
+        )
+        if req_err is not None:
+            return None, f"请求异常: {req_err}"
+        if response is None:
+            return None, "请求失败：无响应"
+        if response.status_code == 403:
+            if _is_cloudflare_challenge(response.text):
+                return None, f"403 Cloudflare challenge (最后尝试 impersonate={used_impersonate})"
+            return None, f"403 Forbidden (impersonate={used_impersonate})"
+
+        patterns = [
+            r'id=["\']nsk-right-panel-container["\'][\s\S]*?<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
+            r'<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
+            r'鸡腿\s*([0-9,]+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, response.text, flags=re.S | re.I)
+            if match:
+                return f"鸡腿 {match.group(1)}", "查询成功"
+
+        return None, "未能从右侧面板解析到总鸡腿数"
+    except Exception as e:
+        return None, f"查询异常: {str(e)}"
+
+
 # ---------------- 查询签到收益统计函数 ----------------
 def get_signin_stats(ns_cookie, days=30):
     """查询前days天内的签到收益统计"""
@@ -585,17 +628,26 @@ if __name__ == "__main__":
 
         if result in ["success", "already"]:
             print(f"账号 {display_user} 签到成功: {msg}")
-            
+
             print("正在查询签到收益统计...")
             stats, stats_msg = get_signin_stats(cookie, 30)
             if stats:
                 print_signin_stats(stats, display_user)
             else:
                 print(f"统计查询失败: {stats_msg}")
-            
+
+            print("正在查询总鸡腿数...")
+            total_chicken, total_chicken_msg = get_total_chicken(cookie)
+            if total_chicken:
+                print(f"账号 {display_user} 当前总鸡腿数: {total_chicken}")
+            else:
+                print(f"总鸡腿数查询失败: {total_chicken_msg}")
+
             if hadsend:
                 try:
                     notification_msg = f"账号 {display_user} 签到成功：{msg}"
+                    if total_chicken:
+                        notification_msg += f"\n当前总鸡腿数：{total_chicken}"
                     if stats:
                         notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                     send("NodeSeek 签到", notification_msg)
@@ -613,19 +665,28 @@ if __name__ == "__main__":
                     if result in ["success", "already"]:
                         print(f"账号 {display_user} 签到成功: {msg}")
                         cookies_updated = True
-                        
+
                         print("正在查询签到收益统计...")
                         stats, stats_msg = get_signin_stats(new_cookie, 30)
                         if stats:
                             print_signin_stats(stats, display_user)
                         else:
                             print(f"统计查询失败: {stats_msg}")
-                        
+
+                        print("正在查询总鸡腿数...")
+                        total_chicken, total_chicken_msg = get_total_chicken(new_cookie)
+                        if total_chicken:
+                            print(f"账号 {display_user} 当前总鸡腿数: {total_chicken}")
+                        else:
+                            print(f"总鸡腿数查询失败: {total_chicken_msg}")
+
                         cookie_list[i] = new_cookie
-                        
+
                         if hadsend:
                             try:
                                 notification_msg = f"账号 {display_user} 签到成功：{msg}"
+                                if total_chicken:
+                                    notification_msg += f"\n当前总鸡腿数：{total_chicken}"
                                 if stats:
                                     notification_msg += f"\n{stats['period']}已签到{stats['days_count']}天，共获得{stats['total_amount']}个鸡腿，平均{stats['average']}个/天"
                                 send("NodeSeek 签到", notification_msg)
