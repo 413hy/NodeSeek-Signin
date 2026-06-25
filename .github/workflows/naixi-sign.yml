@@ -1,9 +1,11 @@
 name: 奶昔论坛签到
 
 on:
+  push:
+    branches:
+      - main
   schedule:
-    # 北京时间 08:20，对应 UTC 00:20
-    - cron: "20 0 * * *"
+    - cron: '25 02 * * *'  # 北京时间 00:00 (UTC+8)，对应UTC时间 16:00
   workflow_dispatch:
 
 permissions:
