@@ -78,12 +78,10 @@ def extract_cdata_or_text(raw_text: str) -> str:
 
 def decode_digit_spans(fragment: str) -> str:
     """
-    奶昔论坛页面里的积分数字可能不是文本，而是这种形式：
+    解析这种数字：
 
-    <span class="three"></span>
-    <span class="five"></span>
-
-    这代表 35。
+    <span class="three"></span> -> 3
+    <span class="one"></span><span class="two"></span> -> 12
     """
     digits = []
 
@@ -96,12 +94,12 @@ def decode_digit_spans(fragment: str) -> str:
         classes = class_value.split()
 
         found_digit = None
+
         for cls in classes:
             if cls in DIGIT_CLASS_MAP:
                 found_digit = DIGIT_CLASS_MAP[cls]
                 break
 
-            # 兼容 num3、digit3 这种类名
             number_match = re.search(r"(\d)", cls)
             if number_match:
                 found_digit = number_match.group(1)
@@ -118,13 +116,17 @@ def decode_digit_spans(fragment: str) -> str:
     return "".join(digits)
 
 
-def extract_points_from_sign_page(page_text: str) -> tuple[str, str]:
+def extract_today_points_from_sign_page(page_text: str) -> str:
     """
-    从签到页面提取积分/数字统计。
+    提取今日签到积分。
 
-    优先找包含“积分”的 li。
-    如果找不到，就回退到页面里第 3 个带数字 span 的 li，
-    对应你给的 XPath 里 li[3] 的思路。
+    你之前给的 XPath：
+    //*[@id="wp"]/div[2]/div[1]/div[2]/div/ul/li[3]/p/b[1]/span
+
+    页面里实际数字可能是：
+    <span class="three"></span>
+
+    所以这里从签到统计区域里的 li 里解析 class 数字。
     """
     li_blocks = re.findall(r"<li\b[^>]*>(.*?)</li>", page_text, flags=re.S | re.I)
 
@@ -139,23 +141,51 @@ def extract_points_from_sign_page(page_text: str) -> tuple[str, str]:
             continue
 
         label = strip_tags(li)
-        candidates.append((label, number, li))
+        candidates.append((label, number))
 
-    for label, number, _ in candidates:
-        if "积分" in label:
-            return number, label
+    # 优先找“今日”相关项
+    for label, number in candidates:
+        if any(keyword in label for keyword in ["今日", "今天", "本次", "获得"]):
+            return number
 
-    # 回退：取第 3 个带数字 span 的统计项
+    # 兼容你给的 li[3]：取第 3 个带数字 span 的统计项
     if len(candidates) >= 3:
-        label, number, _ = candidates[2]
-        return number, label
+        return candidates[2][1]
 
-    # 再回退：取第 1 个能识别出的数字
+    # 兜底取第一个
     if candidates:
-        label, number, _ = candidates[0]
-        return number, label
+        return candidates[0][1]
 
-    return "", ""
+    return ""
+
+
+def extract_total_points_from_sign_page(page_text: str) -> str:
+    """
+    提取总积分。
+
+    你给的 HTML：
+    <a href="home.php?mod=space&amp;uid=14497&amp;do=profile" class="xi2">34</a>
+
+    XPath：
+    //*[@id="favatar172497"]/div[4]/table/tbody/tr/td/p/a
+    """
+    text = html.unescape(page_text)
+
+    patterns = [
+        # href 在前，class 在后
+        r"<a\b[^>]*href=['\"]home\.php\?mod=space&uid=\d+&do=profile['\"][^>]*class=['\"][^'\"]*\bxi2\b[^'\"]*['\"][^>]*>\s*(\d+)\s*</a>",
+        # class 在前，href 在后
+        r"<a\b[^>]*class=['\"][^'\"]*\bxi2\b[^'\"]*['\"][^>]*href=['\"]home\.php\?mod=space&uid=\d+&do=profile['\"][^>]*>\s*(\d+)\s*</a>",
+        # 宽松兜底：profile 链接中的数字
+        r"<a\b[^>]*do=profile[^>]*>\s*(\d+)\s*</a>",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.S | re.I)
+        if match:
+            return match.group(1)
+
+    return ""
 
 
 def get_formhash(session: requests.Session) -> str:
@@ -282,17 +312,28 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     resp = session.get(sign_url, timeout=30)
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
 
-    # 签到后重新访问签到页，获取积分
     try:
         page_resp = session.get(SIGN_PAGE, timeout=30)
         page_resp.raise_for_status()
 
-        points, points_label = extract_points_from_sign_page(page_resp.text)
+        page_text = page_resp.text
 
-        if points:
-            message = f"{message}，当前积分: {points}"
+        today_points = extract_today_points_from_sign_page(page_text)
+        total_points = extract_total_points_from_sign_page(page_text)
+
+        extra_parts = []
+
+        if today_points:
+            extra_parts.append(f"今日签到积分: {today_points}")
         else:
-            message = f"{message}，未能从签到页解析到积分"
+            extra_parts.append("今日签到积分: 未解析到")
+
+        if total_points:
+            extra_parts.append(f"总积分: {total_points}")
+        else:
+            extra_parts.append("总积分: 未解析到")
+
+        message = f"{message}，" + "，".join(extra_parts)
 
     except Exception as e:
         message = f"{message}，获取积分失败: {e}"
