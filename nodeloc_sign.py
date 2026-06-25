@@ -2,6 +2,7 @@
 
 import os
 import sys
+import hashlib
 from typing import Callable
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -37,6 +38,30 @@ LOGGED_IN_KEYWORDS = (
 def get_env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     return value.strip() if value else default
+
+
+def cookie_fingerprint(cookie_raw: str) -> str:
+    return hashlib.sha256(cookie_raw.encode("utf-8")).hexdigest()[:12]
+
+
+def load_cookie_raw() -> tuple[str, str, str]:
+    nodeloc_cookie = get_env("NODELOC_COOKIE")
+    nl_cookie = get_env("NL_COOKIE")
+
+    if nodeloc_cookie and nl_cookie and nodeloc_cookie != nl_cookie:
+        return (
+            "",
+            "conflict",
+            "同时配置了 NODELOC_COOKIE 和 NL_COOKIE，且内容不同。请删除旧的 secret，只保留一个。",
+        )
+
+    if nodeloc_cookie:
+        return nodeloc_cookie, "NODELOC_COOKIE", ""
+
+    if nl_cookie:
+        return nl_cookie, "NL_COOKIE", ""
+
+    return "", "", "未配置 NODELOC_COOKIE 或 NL_COOKIE，无法进行 NodeLoc 签到。"
 
 
 def load_notify() -> Callable[[str, str], None] | None:
@@ -310,9 +335,9 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 def main():
     send = load_notify()
 
-    cookie_raw = get_env("NODELOC_COOKIE") or get_env("NL_COOKIE")
+    cookie_raw, cookie_source, cookie_error = load_cookie_raw()
     if not cookie_raw:
-        msg = "未配置 NODELOC_COOKIE 或 NL_COOKIE，无法进行 NodeLoc 签到。"
+        msg = cookie_error
         print(msg)
         if send:
             try:
@@ -320,6 +345,9 @@ def main():
             except Exception as e:
                 print(f"发送通知失败: {e}")
         sys.exit(1)
+
+    fingerprint = cookie_fingerprint(cookie_raw)
+    print(f"使用 Cookie 来源: {cookie_source}，指纹: {fingerprint}")
 
     cookies = split_cookies(cookie_raw)
     if not cookies:
