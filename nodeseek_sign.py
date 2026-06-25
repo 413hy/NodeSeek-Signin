@@ -402,16 +402,22 @@ def sign(ns_cookie, ns_random):
 
 
 # ---------------- 查询总鸡腿函数 ----------------
+def format_total_chicken_value(text: str):
+    match = re.search(r"鸡腿\s*([0-9,]+)", text or "", flags=re.S)
+    if match:
+        return f"鸡腿 {match.group(1)}"
+
+    return None
+
+
 def extract_total_chicken_text(page_text: str):
-    patterns = [
+    match = re.search(
         r'id=["\']nsk-right-panel-container["\'][\s\S]*?<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
-        r'<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
-        r'鸡腿\s*([0-9,]+)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, page_text, flags=re.S | re.I)
-        if match:
-            return f"鸡腿 {match.group(1)}"
+        page_text,
+        flags=re.S | re.I,
+    )
+    if match:
+        return f"鸡腿 {match.group(1)}"
 
     return None
 
@@ -462,12 +468,14 @@ def get_total_chicken_from_rendered_page(ns_cookie):
             except PlaywrightTimeoutError:
                 pass
 
-            body_text = page.locator("body").inner_text(timeout=5000)
-            total_chicken = extract_total_chicken_text(body_text)
+            container = page.locator("#nsk-right-panel-container")
+            container.wait_for(state="visible", timeout=10000)
+            container_text = container.inner_text(timeout=5000)
+            total_chicken = format_total_chicken_value(container_text)
             if total_chicken:
                 return total_chicken, "查询成功"
 
-            return None, "渲染后页面也未解析到总鸡腿数"
+            return None, "右侧面板中未解析到总鸡腿数"
     except Exception as e:
         return None, f"渲染页面查询异常: {str(e)}"
     finally:
