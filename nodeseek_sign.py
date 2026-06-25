@@ -211,6 +211,28 @@ def save_cookie_to_ql(var_name: str, cookie: str):
 # ---------------- Docker Cookie 文件保存 ----------------
 COOKIE_FILE_PATH = "./cookie/NS_COOKIE.txt"
 
+
+def parse_cookie_header(cookie_header: str) -> list[dict[str, str]]:
+    cookies = []
+
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+
+        cookies.append({
+            "name": name,
+            "value": value.strip(),
+            "url": "https://www.nodeseek.com/",
+        })
+
+    return cookies
+
 def save_cookie_to_file(cookie_str: str):
     """将Cookie保存到文件"""
     try:
@@ -380,6 +402,82 @@ def sign(ns_cookie, ns_random):
 
 
 # ---------------- 查询总鸡腿函数 ----------------
+def extract_total_chicken_text(page_text: str):
+    patterns = [
+        r'id=["\']nsk-right-panel-container["\'][\s\S]*?<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
+        r'<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
+        r'鸡腿\s*([0-9,]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_text, flags=re.S | re.I)
+        if match:
+            return f"鸡腿 {match.group(1)}"
+
+    return None
+
+
+def get_total_chicken_from_rendered_page(ns_cookie):
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        return None, f"Playwright 未可用，无法渲染页面读取总鸡腿数: {e}"
+
+    browser = None
+
+    try:
+        parsed_cookies = parse_cookie_header(ns_cookie)
+        if not parsed_cookies:
+            return None, "Cookie 为空或格式不正确"
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
+                ),
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            context.add_cookies(parsed_cookies)
+            page = context.new_page()
+            page.goto("https://www.nodeseek.com/board", wait_until="networkidle", timeout=60000)
+
+            xpath = '//*[@id="nsk-right-panel-container"]/div[1]/div[2]/div[1]/div[2]/a/span'
+            locator = page.locator(f"xpath={xpath}")
+            try:
+                locator.wait_for(state="visible", timeout=20000)
+                text = locator.inner_text(timeout=5000).strip()
+                if text:
+                    return text, "查询成功"
+            except PlaywrightTimeoutError:
+                pass
+
+            body_text = page.locator("body").inner_text(timeout=5000)
+            total_chicken = extract_total_chicken_text(body_text)
+            if total_chicken:
+                return total_chicken, "查询成功"
+
+            return None, "渲染后页面也未解析到总鸡腿数"
+    except Exception as e:
+        return None, f"渲染页面查询异常: {str(e)}"
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
 def get_total_chicken(ns_cookie):
     """从右侧面板读取总鸡腿数。"""
     if not ns_cookie:
@@ -405,17 +503,11 @@ def get_total_chicken(ns_cookie):
                 return None, f"403 Cloudflare challenge (最后尝试 impersonate={used_impersonate})"
             return None, f"403 Forbidden (impersonate={used_impersonate})"
 
-        patterns = [
-            r'id=["\']nsk-right-panel-container["\'][\s\S]*?<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
-            r'<span\b[^>]*>\s*鸡腿\s*([0-9,]+)\s*</span>',
-            r'鸡腿\s*([0-9,]+)',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, response.text, flags=re.S | re.I)
-            if match:
-                return f"鸡腿 {match.group(1)}", "查询成功"
+        total_chicken = extract_total_chicken_text(response.text)
+        if total_chicken:
+            return total_chicken, "查询成功"
 
-        return None, "未能从右侧面板解析到总鸡腿数"
+        return get_total_chicken_from_rendered_page(ns_cookie)
     except Exception as e:
         return None, f"查询异常: {str(e)}"
 
