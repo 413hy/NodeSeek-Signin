@@ -2,3 +2,5 @@ curl_cffi
 requests
 playwright
 tzdata
+selenium>=4.10.0
+undetected-chromedriver>=3.5.0

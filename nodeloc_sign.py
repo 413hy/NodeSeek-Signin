@@ -1,47 +1,37 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
 import os
 import sys
-import hashlib
+import time
 from typing import Callable
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+import undetected_chromedriver as uc
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 
-BASE_URL = "https://www.nodeloc.com/"
-LOGIN_BUTTON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[3]/span/span/button'
-CHECKIN_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[3]/ul/li[2]/button'
-CHECKIN_BUTTON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button'
-CHECKIN_ICON_XPATH = '//*[@id="ember3"]/div[3]/header/div/div/div[4]/ul/li[2]/button/svg'
-CHECKIN_SELECTOR = ".checkin-button"
+DOMAIN = "www.nodeloc.com"
+BASE_URL = f"https://{DOMAIN}"
+USER_PAGE = f"{BASE_URL}/u/"
+
+CHECKIN_BUTTON = "li.header-dropdown-toggle.checkin-icon button.checkin-button"
+LOGIN_BUTTON = "button.login-button"
+LOGIN_OK_SELECTOR = "div.directory-table__row.me"
+USERNAME_SELECTOR = "div.directory-table__row.me a[data-user-card]"
 ALREADY_SIGNED_TOOLTIP = "您今天已经签到过了"
-SIGNED_KEYWORDS = (
-    "已签到",
-    "今日已签到",
-    "今天已签到",
-    "签到成功",
-    "连续签到",
-    ALREADY_SIGNED_TOOLTIP,
-)
-CHECKIN_BLOCKED_KEYWORDS = (
+
+BLOCKED_KEYWORDS = (
     "发帖后签到",
     "回帖后签到",
     "今天发帖",
     "今天回帖",
     "签到失败",
-    "try again later",
     "check-in failed",
-)
-LOGIN_KEYWORDS = (
-    "登录到您的账户",
-    "电子邮件或用户名",
-    "请输入密码",
-    "创建账户",
-)
-LOGGED_IN_KEYWORDS = (
-    "欢迎回来",
-    "Welcome back",
+    "try again later",
 )
 
 
@@ -58,13 +48,6 @@ def load_cookie_raw() -> tuple[str, str, str]:
     nodeloc_cookie = get_env("NODELOC_COOKIE")
     nl_cookie = get_env("NL_COOKIE")
 
-    if nodeloc_cookie and nl_cookie and nodeloc_cookie != nl_cookie:
-        return (
-            "",
-            "conflict",
-            "同时配置了 NODELOC_COOKIE 和 NL_COOKIE，且内容不同。请删除旧的 secret，只保留一个。",
-        )
-
     if nodeloc_cookie:
         return nodeloc_cookie, "NODELOC_COOKIE", ""
 
@@ -77,6 +60,7 @@ def load_cookie_raw() -> tuple[str, str, str]:
 def load_notify() -> Callable[[str, str], None] | None:
     try:
         from notify import send
+
         return send
     except Exception:
         return None
@@ -90,15 +74,45 @@ def split_cookies(cookie_raw: str) -> list[str]:
         if not line:
             continue
 
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+
         parts = [part.strip() for part in line.split("&") if part.strip()]
         cookies.extend(parts)
 
     return cookies
 
 
-def parse_cookie_header(cookie_header: str) -> list[dict[str, str]]:
-    cookies = []
+def create_browser():
+    options = uc.ChromeOptions()
+    for arg in (
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--headless=new",
+    ):
+        options.add_argument(arg)
 
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36"
+    )
+
+    driver = uc.Chrome(options=options)
+    driver.set_window_size(1920, 1080)
+    driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>false})")
+    driver.execute_script("window.chrome={runtime:{}}")
+    driver.execute_script("Object.defineProperty(navigator,'languages',{get:()=>['zh-CN','zh']})")
+    driver.execute_script("Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]})")
+    return driver
+
+
+def parse_cookie_header(cookie_header: str) -> list[tuple[str, str]]:
+    cookies = []
     for part in cookie_header.split(";"):
         part = part.strip()
         if not part or "=" not in part:
@@ -106,110 +120,77 @@ def parse_cookie_header(cookie_header: str) -> list[dict[str, str]]:
 
         name, value = part.split("=", 1)
         name = name.strip()
-        if not name:
-            continue
-
-        cookies.append({
-            "name": name,
-            "value": value.strip(),
-            "url": BASE_URL,
-        })
+        if name:
+            cookies.append((name, value.strip()))
 
     return cookies
 
 
-def has_signed_text(page) -> bool:
+def inject_cookies(driver, cookie_header: str) -> int:
+    driver.get(BASE_URL)
+    injected = 0
+
+    for name, value in parse_cookie_header(cookie_header):
+        variants = (
+            {"name": name, "value": value, "domain": DOMAIN, "path": "/", "secure": True},
+            {"name": name, "value": value, "domain": ".nodeloc.com", "path": "/", "secure": True},
+            {"name": name, "value": value, "path": "/", "secure": True},
+        )
+
+        for cookie in variants:
+            try:
+                driver.add_cookie(cookie)
+                injected += 1
+                break
+            except Exception:
+                continue
+
+    return injected
+
+
+def wait_login_success(driver, timeout: int = 20) -> bool:
     try:
-        body_text = page.locator("body").inner_text(timeout=5000)
-    except Exception:
+        WebDriverWait(driver, timeout).until(
+            EC.any_of(
+                EC.presence_of_element_located((By.CSS_SELECTOR, LOGIN_OK_SELECTOR)),
+                EC.presence_of_element_located((By.CSS_SELECTOR, CHECKIN_BUTTON)),
+            )
+        )
+        return True
+    except TimeoutException:
         return False
 
-    return any(keyword in body_text for keyword in SIGNED_KEYWORDS)
 
-
-def collect_page_status_text(page) -> str:
-    texts = []
-
-    for selector in (
-        "[role='alert']",
-        ".Alert",
-        ".alert",
-        ".toast",
-        ".Toast",
-        ".modal",
-        ".Modal",
-        ".dialog",
-        ".Dialog",
-        ".d-modal",
-        ".d-modal__body",
-        ".checkInSuccessModal",
-        ".checkInFailedModal",
-    ):
-        try:
-            locator = page.locator(selector)
-            count = min(locator.count(), 5)
-            for index in range(count):
-                text = locator.nth(index).inner_text(timeout=1000).strip()
-                if text:
-                    texts.append(text)
-        except Exception:
-            continue
-
+def page_requires_login(driver) -> bool:
     try:
-        body_text = page.locator("body").inner_text(timeout=3000)
-        for keyword in CHECKIN_BLOCKED_KEYWORDS + LOGIN_KEYWORDS:
-            if keyword in body_text:
-                texts.append(keyword)
-    except Exception:
-        pass
-
-    unique_texts = []
-    for text in texts:
-        normalized = " ".join(text.split())
-        if normalized and normalized not in unique_texts:
-            unique_texts.append(normalized)
-
-    return "；".join(unique_texts[:5])
-
-
-def has_checkin_blocked_text(text: str) -> bool:
-    lower_text = text.lower()
-    return any(keyword.lower() in lower_text for keyword in CHECKIN_BLOCKED_KEYWORDS)
-
-
-def has_login_prompt(page) -> bool:
-    try:
-        login_button = page.locator(f"xpath={LOGIN_BUTTON_XPATH}")
-        if login_button.count() > 0 and login_button.first.is_visible(timeout=2000):
+        if driver.find_elements(By.CSS_SELECTOR, LOGIN_BUTTON):
             return True
     except Exception:
         pass
 
     try:
-        body_text = page.locator("body").inner_text(timeout=5000)
+        text = driver.find_element(By.TAG_NAME, "body").text
     except Exception:
         return False
 
-    return any(keyword in body_text for keyword in LOGIN_KEYWORDS)
+    return any(keyword in text for keyword in ("登录到您的账户", "电子邮件或用户名", "请输入密码"))
 
 
-def get_current_user(page) -> tuple[bool, str]:
+def get_current_user(driver) -> tuple[bool, str]:
     try:
-        result = page.evaluate(
-            """async () => {
-                const response = await fetch('/session/current.json', {
-                    credentials: 'include',
-                    headers: { 'accept': 'application/json' }
-                });
+        result = driver.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            fetch('/session/current.json', {
+                credentials: 'include',
+                headers: { 'accept': 'application/json' }
+            }).then(async (response) => {
                 const text = await response.text();
                 let data = null;
-                try {
-                    data = text ? JSON.parse(text) : null;
-                } catch (e) {
-                    data = null;
-                }
-                return { status: response.status, data };
-            }"""
+                try { data = text ? JSON.parse(text) : null; } catch (e) {}
+                done({ status: response.status, data });
+            }).catch((error) => done({ status: 0, error: String(error) }));
+            """
         )
         data = result.get("data") if isinstance(result, dict) else None
         current_user = data.get("current_user") if isinstance(data, dict) else None
@@ -222,30 +203,39 @@ def get_current_user(page) -> tuple[bool, str]:
     return False, ""
 
 
-def get_checkin_state(page) -> dict | None:
+def get_username(driver) -> str:
+    logged_in, username = get_current_user(driver)
+    if logged_in:
+        return username
+
     try:
-        result = page.evaluate(
-            """() => {
-                const user = window.app && window.app.session && window.app.session.user;
-                if (!user || typeof user.attribute !== 'function') {
-                    return null;
-                }
+        element = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, USERNAME_SELECTOR))
+        )
+        return element.get_attribute("data-user-card") or "未知用户"
+    except Exception:
+        return "未知用户"
 
-                const attr = (name) => {
-                    try {
-                        return user.attribute(name);
-                    } catch (e) {
-                        return null;
-                    }
-                };
 
-                return {
-                    canCheckin: attr('canCheckin'),
-                    isPostToday: attr('isPostToday'),
-                    lastCheckinTime: attr('lastCheckinTime'),
-                    totalContinuousCheckIn: attr('totalContinuousCheckIn')
-                };
-            }"""
+def get_checkin_state(driver) -> dict | None:
+    try:
+        result = driver.execute_script(
+            """
+            const user = window.app && window.app.session && window.app.session.user;
+            if (!user || typeof user.attribute !== 'function') {
+                return null;
+            }
+
+            const attr = (name) => {
+                try { return user.attribute(name); } catch (e) { return null; }
+            };
+
+            return {
+                canCheckin: attr('canCheckin'),
+                isPostToday: attr('isPostToday'),
+                lastCheckinTime: attr('lastCheckinTime')
+            };
+            """
         )
     except Exception:
         return None
@@ -267,275 +257,181 @@ def classify_checkin_state(state: dict | None, clicked: bool) -> tuple[str, str]
     if can_checkin is False and is_post_today is True:
         if clicked:
             return "success", "NodeLoc 签到成功，页面状态已变为今日不可重复签到"
+
         detail = f"，上次签到时间: {last_checkin_time}" if last_checkin_time else ""
         return "already", f"NodeLoc 今日已签到{detail}"
 
     return None
 
 
-def is_logged_in(page) -> bool:
-    ok, _ = get_current_user(page)
-    if ok:
-        return True
+def hover_checkin(driver, button=None) -> str:
+    texts = []
 
     try:
-        body_text = page.locator("body").inner_text(timeout=5000)
-        if any(keyword in body_text for keyword in LOGGED_IN_KEYWORDS):
-            return True
+        target = button or WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, CHECKIN_BUTTON))
+        )
+        ActionChains(driver).move_to_element(target).perform()
+        time.sleep(1)
     except Exception:
-        pass
+        return ""
 
-    for selector in (
-        ".current-user",
-        ".header-dropdown-toggle.current-user",
-        ".user-menu",
-        ".user-menu-trigger",
-    ):
+    for selector in ("[role='tooltip']", ".tooltip", ".d-tooltip", ".ember-tooltip"):
         try:
-            if page.locator(selector).count() > 0:
-                return True
+            for element in driver.find_elements(By.CSS_SELECTOR, selector)[:5]:
+                text = element.text.strip()
+                if text:
+                    texts.append(text)
         except Exception:
             continue
 
-    return False
+    return "；".join(dict.fromkeys(texts))
 
 
-def get_button_hint_text(page, button) -> str:
+def collect_page_status_text(driver) -> str:
     texts = []
 
-    for attr in (
-        "title",
-        "aria-label",
-        "data-tooltip",
-        "data-original-title",
-        "data-title",
-    ):
-        try:
-            value = button.get_attribute(attr, timeout=2000)
-        except Exception:
-            value = None
-        if value:
-            texts.append(value)
-
-    try:
-        texts.append(button.inner_text(timeout=2000))
-    except Exception:
-        pass
-
-    try:
-        button.hover(timeout=10000)
-        page.wait_for_timeout(800)
-    except Exception:
-        pass
-
     for selector in (
-        "[role='tooltip']",
-        ".tooltip",
-        ".d-tooltip",
-        ".d-tooltip-content",
-        ".ember-tooltip",
+        "[role='alert']",
+        ".alert",
+        ".toast",
+        ".modal",
+        ".dialog",
+        ".d-modal",
+        ".d-modal__body",
     ):
         try:
-            tooltip = page.locator(selector)
-            count = min(tooltip.count(), 5)
-            for index in range(count):
-                text = tooltip.nth(index).inner_text(timeout=1000).strip()
+            for element in driver.find_elements(By.CSS_SELECTOR, selector)[:5]:
+                text = element.text.strip()
                 if text:
                     texts.append(text)
         except Exception:
             continue
 
     try:
-        if page.get_by_text(ALREADY_SIGNED_TOOLTIP).count() > 0:
-            texts.append(ALREADY_SIGNED_TOOLTIP)
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        for keyword in BLOCKED_KEYWORDS:
+            if keyword.lower() in body_text.lower():
+                texts.append(keyword)
     except Exception:
         pass
 
-    return "\n".join(text.strip() for text in texts if text and text.strip())
+    return "；".join(dict.fromkeys(" ".join(text.split()) for text in texts if text.strip()))
 
 
-def is_checkin_button(button, hint_text: str) -> bool:
-    fields = [hint_text]
+def has_blocked_text(text: str) -> bool:
+    lower_text = text.lower()
+    return any(keyword.lower() in lower_text for keyword in BLOCKED_KEYWORDS)
 
-    for attr in ("class", "title", "aria-label", "data-tooltip", "data-original-title"):
-        try:
-            value = button.get_attribute(attr, timeout=2000)
-        except Exception:
-            value = None
-        if value:
-            fields.append(value)
 
-    combined = "\n".join(fields).lower()
-    return (
-        "checkin" in combined
-        or "check-in" in combined
-        or "签到" in combined
-        or ALREADY_SIGNED_TOOLTIP in combined
+def already_checked_in(button) -> bool:
+    class_value = button.get_attribute("class") or ""
+    disabled = button.get_attribute("disabled")
+    aria_disabled = button.get_attribute("aria-disabled")
+    return "checked-in" in class_value or disabled is not None or aria_disabled == "true"
+
+
+def find_checkin_button(driver):
+    return WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, CHECKIN_BUTTON))
     )
 
 
-def find_checkin_target(page):
-    candidates = [
-        page.locator(f"xpath={CHECKIN_ICON_XPATH}"),
-        page.locator(f"xpath={CHECKIN_BUTTON_XPATH}"),
-        page.locator(f"xpath={CHECKIN_XPATH}"),
-        page.locator(CHECKIN_SELECTOR),
-    ]
+def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
+    driver = None
 
-    for candidate in candidates:
-        if candidate.count() <= 0:
-            continue
+    try:
+        parsed_cookies = parse_cookie_header(cookie)
+        if not parsed_cookies:
+            return "failed", f"账号{index}: Cookie 为空或格式不正确"
 
-        target = candidate.first
+        driver = create_browser()
+        injected_count = inject_cookies(driver, cookie)
+        if injected_count <= 0:
+            return "failed", f"账号{index}: Cookie 注入失败"
+
+        driver.get(USER_PAGE)
+        if not wait_login_success(driver):
+            return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
+
+        if page_requires_login(driver):
+            return "failed", f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮"
+
+        logged_in, detected_username = get_current_user(driver)
+        if not logged_in:
+            return "failed", f"账号{index}: Cookie 已失效或未登录，session/current 未返回用户"
+
+        username = detected_username or get_username(driver)
+        driver.get(BASE_URL)
+        time.sleep(3)
+
+        state_result = classify_checkin_state(get_checkin_state(driver), clicked=False)
+        if state_result:
+            status, text = state_result
+            return status, f"账号{index}({username}): {text}"
+
         try:
-            target.wait_for(state="visible", timeout=10000)
-        except Exception:
-            continue
+            button = find_checkin_button(driver)
+        except TimeoutException:
+            if page_requires_login(driver):
+                return "failed", f"账号{index}({username}): Cookie 已失效或未登录，页面要求登录"
+            return "failed", f"账号{index}({username}): 未找到签到按钮"
 
-        hint_text = get_button_hint_text(page, target)
-        if not is_checkin_button(target, hint_text):
-            continue
+        hint_text = hover_checkin(driver, button)
+        if ALREADY_SIGNED_TOOLTIP in hint_text or "已经签到过了" in hint_text:
+            return "already", f"账号{index}({username}): NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
+
+        if has_blocked_text(hint_text):
+            return "failed", f"账号{index}({username}): NodeLoc 签到失败，页面提示: {hint_text}"
+
+        if already_checked_in(button):
+            return "already", f"账号{index}({username}): NodeLoc 今日已签到"
+
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", button)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", button)
+        time.sleep(5)
+
+        status_text = collect_page_status_text(driver)
+        if has_blocked_text(status_text):
+            return "failed", f"账号{index}({username}): NodeLoc 签到失败，页面提示: {status_text}"
+
+        state_result = classify_checkin_state(get_checkin_state(driver), clicked=True)
+        if state_result:
+            status, text = state_result
+            return status, f"账号{index}({username}): {text}"
 
         try:
-            click_target = target.locator("xpath=ancestor-or-self::button[1]")
-            if click_target.count() > 0:
-                return click_target.first, hint_text
+            button = find_checkin_button(driver)
+            after_hint = hover_checkin(driver, button)
+            if ALREADY_SIGNED_TOOLTIP in after_hint or "已经签到过了" in after_hint:
+                return "success", f"账号{index}({username}): NodeLoc 签到成功，已显示今日已签到"
+            if already_checked_in(button):
+                return "success", f"账号{index}({username}): NodeLoc 签到成功"
         except Exception:
             pass
 
-        return target, hint_text
+        driver.refresh()
+        time.sleep(5)
 
-    return None, ""
+        if page_requires_login(driver):
+            return "failed", f"账号{index}({username}): Cookie 已失效或未登录，刷新后页面要求登录"
 
+        state_result = classify_checkin_state(get_checkin_state(driver), clicked=True)
+        if state_result:
+            status, text = state_result
+            return status, f"账号{index}({username}): {text}"
 
-def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
-    browser = None
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
-                locale="zh-CN",
-                timezone_id="Asia/Shanghai",
-            )
-
-            parsed_cookies = parse_cookie_header(cookie)
-            if not parsed_cookies:
-                return "failed", f"账号{index}: Cookie 为空或格式不正确"
-
-            context.add_cookies(parsed_cookies)
-            page = context.new_page()
-            page.goto(BASE_URL, wait_until="commit", timeout=60000)
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=30000)
-            except PlaywrightTimeoutError:
-                pass
-            page.wait_for_timeout(10000)
-
-            if has_login_prompt(page):
-                return "failed", f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮"
-
-            logged_in, username = get_current_user(page)
-            if not logged_in:
-                return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
-
-            state_result = classify_checkin_state(get_checkin_state(page), clicked=False)
-            if state_result:
-                status, text = state_result
-                return status, f"账号{index}: {text}"
-
-            checkin_button, hint_text = find_checkin_target(page)
-            if not checkin_button:
-                if has_login_prompt(page):
-                    return "failed", f"账号{index}: Cookie 已失效或未登录，页面要求登录"
-                if has_signed_text(page):
-                    return "already", f"账号{index}: NodeLoc 今日已签到"
-                return "failed", f"账号{index}: 未找到签到按钮，可能 Cookie 失效或页面未登录"
-
-            if ALREADY_SIGNED_TOOLTIP in hint_text or "已经签到过了" in hint_text:
-                return "already", f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
-
-            if has_checkin_blocked_text(hint_text):
-                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {hint_text}"
-
-            if has_login_prompt(page):
-                return "failed", f"账号{index}: Cookie 已失效或未登录，页面要求登录"
-
-            checkin_button.click(timeout=30000)
-            page.wait_for_timeout(5000)
-
-            status_text = collect_page_status_text(page)
-            if has_checkin_blocked_text(status_text):
-                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {status_text}"
-
-            state_result = classify_checkin_state(get_checkin_state(page), clicked=True)
-            if state_result:
-                status, text = state_result
-                return status, f"账号{index}: {text}"
-
-            after_click_hint = get_button_hint_text(page, checkin_button)
-            if ALREADY_SIGNED_TOOLTIP in after_click_hint or "已经签到过了" in after_click_hint:
-                return "already", f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
-
-            if has_signed_text(page):
-                return "success", f"账号{index}: NodeLoc 签到成功"
-
-            if has_login_prompt(page):
-                return "failed", f"账号{index}: Cookie 已失效或未登录，点击后页面要求登录"
-
-            page.reload(wait_until="commit", timeout=60000)
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=30000)
-            except PlaywrightTimeoutError:
-                pass
-            page.wait_for_timeout(5000)
-
-            if has_login_prompt(page):
-                return "failed", f"账号{index}: Cookie 已失效或未登录，刷新后页面要求登录"
-
-            state_result = classify_checkin_state(get_checkin_state(page), clicked=True)
-            if state_result:
-                status, text = state_result
-                return status, f"账号{index}: {text}"
-
-            checkin_button, reload_hint = find_checkin_target(page)
-            reload_status = collect_page_status_text(page)
-            combined_status = "；".join(
-                text for text in (status_text, after_click_hint, reload_hint, reload_status) if text
-            )
-
-            if has_checkin_blocked_text(combined_status):
-                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {combined_status}"
-
-            if (
-                ALREADY_SIGNED_TOOLTIP in combined_status
-                or "已经签到过了" in combined_status
-                or has_signed_text(page)
-            ):
-                return "success", f"账号{index}: NodeLoc 签到成功，刷新后已显示今日已签到"
-
-            detail = combined_status or "页面没有返回成功、已签到或失败提示"
-            return "failed", f"账号{index}: 已点击签到按钮，但未确认签到成功，页面提示: {detail}"
-    except PlaywrightTimeoutError:
+        detail = status_text or "页面没有返回成功、已签到或失败提示"
+        return "failed", f"账号{index}({username}): 已点击签到按钮，但未确认签到成功，页面提示: {detail}"
+    except TimeoutException:
         return "failed", f"账号{index}: NodeLoc 页面加载或按钮等待超时，可能 Cookie 失效或页面未登录"
     except Exception as e:
         return "failed", f"账号{index}: NodeLoc 签到异常: {e}"
     finally:
-        if browser:
+        if driver:
             try:
-                browser.close()
+                driver.quit()
             except Exception:
                 pass
 
@@ -577,12 +473,16 @@ def main():
         status, message = sign_one(cookie, index)
         print(message)
         results.append(message)
+
         if status == "success":
             success_count += 1
         elif status == "already":
             already_count += 1
         else:
             failed_count += 1
+
+        if index < len(cookies):
+            time.sleep(5)
 
     title = "NodeLoc 签到"
     summary = (
