@@ -34,7 +34,7 @@ DIGIT_CLASS_MAP = {
     "nine": "9",
 }
 
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
 def get_env(name: str, default: str = "") -> str:
