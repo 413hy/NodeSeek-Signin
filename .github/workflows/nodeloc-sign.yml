@@ -29,12 +29,6 @@ jobs:
           pip install -r requirements.txt
           google-chrome --version || chromium-browser --version || true
 
-      - name: 随机等待到北京时间 08:00-10:00
-        if: github.event_name == 'schedule'
-        run: |
-          delay=$(( RANDOM % 7201 ))
-          echo "随机等待 ${delay} 秒后执行 NodeLoc 签到"
-          sleep "$delay"
 
       - name: 运行 NodeLoc 签到脚本
         env:
