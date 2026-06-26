@@ -28,12 +28,6 @@ jobs:
         run: |
           pip install requests
 
-      - name: 随机等待到北京时间 07:00-09:00
-        if: github.event_name == 'schedule'
-        run: |
-          delay=$(( RANDOM % 7201 ))
-          echo "随机等待 ${delay} 秒后执行奶昔签到"
-          sleep "$delay"
 
       - name: 运行奶昔论坛签到脚本
         env:
