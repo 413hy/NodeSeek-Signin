@@ -4,6 +4,7 @@ import re
 import sys
 import html
 import time
+import random
 import xml.etree.ElementTree as ET
 
 import requests
@@ -55,7 +56,7 @@ def request_with_retry(
     method: str,
     url: str,
     *,
-    retries: int = 3,
+    retries: int = 6,
     timeout: int = 30,
     **kwargs,
 ) -> requests.Response:
@@ -70,7 +71,7 @@ def request_with_retry(
                 return response
 
             if attempt < retries:
-                wait_seconds = min(10 * attempt, 30)
+                wait_seconds = min(12 * attempt, 60) + random.randint(0, 5)
                 print(
                     f"请求 {url} 返回 HTTP {response.status_code}，"
                     f"{wait_seconds} 秒后重试 {attempt}/{retries}",
@@ -79,11 +80,14 @@ def request_with_retry(
                 time.sleep(wait_seconds)
                 continue
 
-            return response
+            raise RuntimeError(
+                f"请求 {url} 连续 {retries} 次返回 HTTP {response.status_code}，"
+                "目标站或 CDN 当前不稳定"
+            )
         except requests.RequestException as e:
             last_error = e
             if attempt < retries:
-                wait_seconds = min(10 * attempt, 30)
+                wait_seconds = min(12 * attempt, 60) + random.randint(0, 5)
                 print(
                     f"请求 {url} 异常: {e}，{wait_seconds} 秒后重试 {attempt}/{retries}",
                     flush=True,
@@ -385,7 +389,15 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Pragma": "no-cache",
         "Referer": SIGN_PAGE,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1",
         "Cookie": cookie,
     }
     session.headers.update(headers)

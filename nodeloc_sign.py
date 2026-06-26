@@ -24,6 +24,15 @@ SIGNED_KEYWORDS = (
     "连续签到",
     ALREADY_SIGNED_TOOLTIP,
 )
+CHECKIN_BLOCKED_KEYWORDS = (
+    "发帖后签到",
+    "回帖后签到",
+    "今天发帖",
+    "今天回帖",
+    "签到失败",
+    "try again later",
+    "check-in failed",
+)
 LOGIN_KEYWORDS = (
     "登录到您的账户",
     "电子邮件或用户名",
@@ -118,6 +127,56 @@ def has_signed_text(page) -> bool:
     return any(keyword in body_text for keyword in SIGNED_KEYWORDS)
 
 
+def collect_page_status_text(page) -> str:
+    texts = []
+
+    for selector in (
+        "[role='alert']",
+        ".Alert",
+        ".alert",
+        ".toast",
+        ".Toast",
+        ".modal",
+        ".Modal",
+        ".dialog",
+        ".Dialog",
+        ".d-modal",
+        ".d-modal__body",
+        ".checkInSuccessModal",
+        ".checkInFailedModal",
+    ):
+        try:
+            locator = page.locator(selector)
+            count = min(locator.count(), 5)
+            for index in range(count):
+                text = locator.nth(index).inner_text(timeout=1000).strip()
+                if text:
+                    texts.append(text)
+        except Exception:
+            continue
+
+    try:
+        body_text = page.locator("body").inner_text(timeout=3000)
+        for keyword in CHECKIN_BLOCKED_KEYWORDS + LOGIN_KEYWORDS:
+            if keyword in body_text:
+                texts.append(keyword)
+    except Exception:
+        pass
+
+    unique_texts = []
+    for text in texts:
+        normalized = " ".join(text.split())
+        if normalized and normalized not in unique_texts:
+            unique_texts.append(normalized)
+
+    return "；".join(unique_texts[:5])
+
+
+def has_checkin_blocked_text(text: str) -> bool:
+    lower_text = text.lower()
+    return any(keyword.lower() in lower_text for keyword in CHECKIN_BLOCKED_KEYWORDS)
+
+
 def has_login_prompt(page) -> bool:
     try:
         login_button = page.locator(f"xpath={LOGIN_BUTTON_XPATH}")
@@ -161,6 +220,57 @@ def get_current_user(page) -> tuple[bool, str]:
         pass
 
     return False, ""
+
+
+def get_checkin_state(page) -> dict | None:
+    try:
+        result = page.evaluate(
+            """() => {
+                const user = window.app && window.app.session && window.app.session.user;
+                if (!user || typeof user.attribute !== 'function') {
+                    return null;
+                }
+
+                const attr = (name) => {
+                    try {
+                        return user.attribute(name);
+                    } catch (e) {
+                        return null;
+                    }
+                };
+
+                return {
+                    canCheckin: attr('canCheckin'),
+                    isPostToday: attr('isPostToday'),
+                    lastCheckinTime: attr('lastCheckinTime'),
+                    totalContinuousCheckIn: attr('totalContinuousCheckIn')
+                };
+            }"""
+        )
+    except Exception:
+        return None
+
+    return result if isinstance(result, dict) else None
+
+
+def classify_checkin_state(state: dict | None, clicked: bool) -> tuple[str, str] | None:
+    if not state:
+        return None
+
+    can_checkin = state.get("canCheckin")
+    is_post_today = state.get("isPostToday")
+    last_checkin_time = state.get("lastCheckinTime")
+
+    if is_post_today is False:
+        return "failed", "NodeLoc 签到失败，页面要求今天先发帖或回帖后再签到"
+
+    if can_checkin is False and is_post_today is True:
+        if clicked:
+            return "success", "NodeLoc 签到成功，页面状态已变为今日不可重复签到"
+        detail = f"，上次签到时间: {last_checkin_time}" if last_checkin_time else ""
+        return "already", f"NodeLoc 今日已签到{detail}"
+
+    return None
 
 
 def is_logged_in(page) -> bool:
@@ -341,6 +451,11 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
             if not logged_in:
                 return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
 
+            state_result = classify_checkin_state(get_checkin_state(page), clicked=False)
+            if state_result:
+                status, text = state_result
+                return status, f"账号{index}: {text}"
+
             checkin_button, hint_text = find_checkin_target(page)
             if not checkin_button:
                 if has_login_prompt(page):
@@ -352,11 +467,23 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
             if ALREADY_SIGNED_TOOLTIP in hint_text or "已经签到过了" in hint_text:
                 return "already", f"账号{index}: NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
 
+            if has_checkin_blocked_text(hint_text):
+                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {hint_text}"
+
             if has_login_prompt(page):
                 return "failed", f"账号{index}: Cookie 已失效或未登录，页面要求登录"
 
             checkin_button.click(timeout=30000)
             page.wait_for_timeout(5000)
+
+            status_text = collect_page_status_text(page)
+            if has_checkin_blocked_text(status_text):
+                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {status_text}"
+
+            state_result = classify_checkin_state(get_checkin_state(page), clicked=True)
+            if state_result:
+                status, text = state_result
+                return status, f"账号{index}: {text}"
 
             after_click_hint = get_button_hint_text(page, checkin_button)
             if ALREADY_SIGNED_TOOLTIP in after_click_hint or "已经签到过了" in after_click_hint:
@@ -368,7 +495,39 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
             if has_login_prompt(page):
                 return "failed", f"账号{index}: Cookie 已失效或未登录，点击后页面要求登录"
 
-            return "failed", f"账号{index}: 已点击签到按钮，但未确认签到成功"
+            page.reload(wait_until="commit", timeout=60000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except PlaywrightTimeoutError:
+                pass
+            page.wait_for_timeout(5000)
+
+            if has_login_prompt(page):
+                return "failed", f"账号{index}: Cookie 已失效或未登录，刷新后页面要求登录"
+
+            state_result = classify_checkin_state(get_checkin_state(page), clicked=True)
+            if state_result:
+                status, text = state_result
+                return status, f"账号{index}: {text}"
+
+            checkin_button, reload_hint = find_checkin_target(page)
+            reload_status = collect_page_status_text(page)
+            combined_status = "；".join(
+                text for text in (status_text, after_click_hint, reload_hint, reload_status) if text
+            )
+
+            if has_checkin_blocked_text(combined_status):
+                return "failed", f"账号{index}: NodeLoc 签到失败，页面提示: {combined_status}"
+
+            if (
+                ALREADY_SIGNED_TOOLTIP in combined_status
+                or "已经签到过了" in combined_status
+                or has_signed_text(page)
+            ):
+                return "success", f"账号{index}: NodeLoc 签到成功，刷新后已显示今日已签到"
+
+            detail = combined_status or "页面没有返回成功、已签到或失败提示"
+            return "failed", f"账号{index}: 已点击签到按钮，但未确认签到成功，页面提示: {detail}"
     except PlaywrightTimeoutError:
         return "failed", f"账号{index}: NodeLoc 页面加载或按钮等待超时，可能 Cookie 失效或页面未登录"
     except Exception as e:
