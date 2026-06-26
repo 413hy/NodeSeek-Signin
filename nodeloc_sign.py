@@ -2,6 +2,8 @@
 
 import hashlib
 import os
+import re
+import subprocess
 import sys
 import time
 from typing import Callable
@@ -84,6 +86,46 @@ def split_cookies(cookie_raw: str) -> list[str]:
     return cookies
 
 
+def parse_chrome_major(version_text: str) -> int | None:
+    match = re.search(r"\b(\d+)\.\d+\.\d+\.\d+\b", version_text)
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
+def detect_chrome_major() -> int | None:
+    env_version = get_env("NODELOC_CHROME_VERSION_MAIN")
+    if env_version.isdigit():
+        return int(env_version)
+
+    for command in (
+        ("google-chrome", "--version"),
+        ("google-chrome-stable", "--version"),
+        ("chromium-browser", "--version"),
+        ("chromium", "--version"),
+    ):
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            continue
+
+        version_text = f"{result.stdout}\n{result.stderr}"
+        major = parse_chrome_major(version_text)
+        if major:
+            print(f"检测到 Chrome 主版本: {major} ({version_text.strip()})")
+            return major
+
+    print("未检测到 Chrome 主版本，使用 undetected-chromedriver 默认驱动选择")
+    return None
+
+
 def create_browser():
     options = uc.ChromeOptions()
     for arg in (
@@ -102,7 +144,12 @@ def create_browser():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36"
     )
 
-    driver = uc.Chrome(options=options)
+    chrome_major = detect_chrome_major()
+    if chrome_major:
+        driver = uc.Chrome(options=options, version_main=chrome_major)
+    else:
+        driver = uc.Chrome(options=options)
+
     driver.set_window_size(1920, 1080)
     driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>false})")
     driver.execute_script("window.chrome={runtime:{}}")
