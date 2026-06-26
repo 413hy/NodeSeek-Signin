@@ -35,8 +35,7 @@ jobs:
 
       - name: 运行 NodeLoc 签到脚本
         env:
-          NODELOC_COOKIE: ${{ secrets.NODELOC_COOKIE }}
-          NL_COOKIE: ${{ secrets.NL_COOKIE }}
+          NODELOC_COOKIE: ${{ vars.NODELOC_COOKIE || secrets.NODELOC_COOKIE || vars.NL_COOKIE || secrets.NL_COOKIE }}
 
           # 复用原项目 notify.py 的 Telegram 推送配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
