@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Callable
 
+import requests
 import undetected_chromedriver as uc
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
@@ -19,6 +20,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 DOMAIN = "www.nodeloc.com"
 BASE_URL = f"https://{DOMAIN}"
 USER_PAGE = f"{BASE_URL}/u/"
+SESSION_CURRENT_URL = f"{BASE_URL}/session/current.json"
 
 CHECKIN_BUTTON = "li.header-dropdown-toggle.checkin-icon button.checkin-button"
 LOGIN_BUTTON = "button.login-button"
@@ -171,6 +173,42 @@ def parse_cookie_header(cookie_header: str) -> list[tuple[str, str]]:
             cookies.append((name, value.strip()))
 
     return cookies
+
+
+def check_cookie_session(cookie_header: str) -> tuple[bool, str, str]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/138.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": BASE_URL,
+        "Cookie": cookie_header,
+    }
+
+    try:
+        response = requests.get(SESSION_CURRENT_URL, headers=headers, timeout=30)
+    except requests.RequestException as e:
+        return False, "", f"requests session/current 请求异常: {e}"
+
+    preview = response.text[:160].replace("\n", " ").strip()
+    detail = f"requests session/current HTTP {response.status_code}"
+    if preview:
+        detail = f"{detail}, body={preview}"
+
+    try:
+        data = response.json()
+    except ValueError:
+        return False, "", detail
+
+    current_user = data.get("current_user") if isinstance(data, dict) else None
+    if current_user:
+        username = current_user.get("username") or current_user.get("name") or "unknown"
+        return True, str(username), f"requests session/current HTTP {response.status_code}"
+
+    return False, "", detail
 
 
 def inject_cookies(driver, cookie_header: str) -> int:
@@ -440,6 +478,9 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
         if not parsed_cookies:
             return "failed", f"账号{index}: Cookie 为空或格式不正确"
 
+        cookie_valid, cookie_username, cookie_session_detail = check_cookie_session(cookie)
+        print(f"账号{index}: Cookie 预检结果: {cookie_session_detail}", flush=True)
+
         driver = create_browser()
         injected_count = inject_cookies(driver, cookie)
         if injected_count <= 0:
@@ -456,6 +497,12 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
                 break
 
             if page_requires_login(driver):
+                if cookie_valid:
+                    return "failed", (
+                        f"账号{index}({cookie_username}): Cookie 预检有效，但浏览器页面显示登录按钮，"
+                        f"{last_login_detail}，{describe_page(driver)}"
+                    )
+
                 return "failed", (
                     f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
                     f"{last_login_detail}，{describe_page(driver)}"
@@ -469,18 +516,30 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
             time.sleep(5)
 
         if not logged_in:
+            if cookie_valid:
+                return "failed", (
+                    f"账号{index}({cookie_username}): Cookie 预检有效，但浏览器未能确认登录态，"
+                    f"{last_login_detail}，{describe_page(driver)}"
+                )
+
             return "failed", (
                 f"账号{index}: 未能确认登录态，不直接判定 Cookie 失效，"
                 f"{last_login_detail}，{describe_page(driver)}"
             )
 
         if page_requires_login(driver):
+            if cookie_valid:
+                return "failed", (
+                    f"账号{index}({cookie_username}): Cookie 预检有效，但页面显示登录按钮，"
+                    f"{describe_page(driver)}"
+                )
+
             return "failed", (
                 f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
                 f"{describe_page(driver)}"
             )
 
-        username = detected_username or get_username(driver)
+        username = detected_username or cookie_username or get_username(driver)
         driver.get(BASE_URL)
         time.sleep(3)
 
