@@ -224,6 +224,11 @@ def page_requires_login(driver) -> bool:
 
 
 def get_current_user(driver) -> tuple[bool, str]:
+    logged_in, username, _detail = get_current_user_detail(driver)
+    return logged_in, username
+
+
+def get_current_user_detail(driver) -> tuple[bool, str, str]:
     try:
         result = driver.execute_async_script(
             """
@@ -243,11 +248,54 @@ def get_current_user(driver) -> tuple[bool, str]:
         current_user = data.get("current_user") if isinstance(data, dict) else None
         if current_user:
             username = current_user.get("username") or current_user.get("name") or "unknown"
-            return True, str(username)
+            return True, str(username), f"session/current HTTP {result.get('status')}"
+
+        status = result.get("status") if isinstance(result, dict) else "unknown"
+        error = result.get("error") if isinstance(result, dict) else ""
+        return False, "", f"session/current HTTP {status}{f', {error}' if error else ''}"
+    except Exception as e:
+        return False, "", f"session/current 检测异常: {e}"
+
+
+def wait_current_user(driver, timeout: int = 45) -> tuple[bool, str, str]:
+    deadline = time.time() + timeout
+    last_detail = ""
+
+    while time.time() < deadline:
+        logged_in, username, detail = get_current_user_detail(driver)
+        last_detail = detail
+        if logged_in:
+            return True, username, detail
+
+        time.sleep(3)
+
+    return False, "", last_detail or "session/current 未返回用户"
+
+
+def describe_page(driver) -> str:
+    parts = []
+
+    try:
+        parts.append(f"url={driver.current_url}")
     except Exception:
         pass
 
-    return False, ""
+    try:
+        title = driver.title.strip()
+        if title:
+            parts.append(f"title={title}")
+    except Exception:
+        pass
+
+    try:
+        text = driver.find_element(By.TAG_NAME, "body").text
+        text = " ".join(text.split())
+        if text:
+            parts.append(f"body={text[:160]}")
+    except Exception:
+        pass
+
+    return "；".join(parts) if parts else "页面状态不可读取"
 
 
 def get_username(driver) -> str:
@@ -397,16 +445,40 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
         if injected_count <= 0:
             return "failed", f"账号{index}: Cookie 注入失败"
 
-        driver.get(USER_PAGE)
-        if not wait_login_success(driver):
-            return "failed", f"账号{index}: Cookie 已失效或未登录，未检测到登录态"
+        last_login_detail = ""
+        logged_in = False
+        detected_username = ""
+
+        for attempt in range(1, 4):
+            driver.get(USER_PAGE)
+            logged_in, detected_username, last_login_detail = wait_current_user(driver)
+            if logged_in:
+                break
+
+            if page_requires_login(driver):
+                return "failed", (
+                    f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
+                    f"{last_login_detail}，{describe_page(driver)}"
+                )
+
+            print(
+                f"账号{index}: 第 {attempt}/3 次登录态检测未确认，"
+                f"{last_login_detail}，{describe_page(driver)}",
+                flush=True,
+            )
+            time.sleep(5)
+
+        if not logged_in:
+            return "failed", (
+                f"账号{index}: 未能确认登录态，不直接判定 Cookie 失效，"
+                f"{last_login_detail}，{describe_page(driver)}"
+            )
 
         if page_requires_login(driver):
-            return "failed", f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮"
-
-        logged_in, detected_username = get_current_user(driver)
-        if not logged_in:
-            return "failed", f"账号{index}: Cookie 已失效或未登录，session/current 未返回用户"
+            return "failed", (
+                f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
+                f"{describe_page(driver)}"
+            )
 
         username = detected_username or get_username(driver)
         driver.get(BASE_URL)

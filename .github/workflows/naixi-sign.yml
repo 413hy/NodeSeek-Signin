@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '00 17 * * *'  # 北京时间 00:00 (UTC+8)，对应UTC时间 16:00
+    - cron: '35 2 * * *'  # 北京时间 10:35 (UTC+8)，错开 GitHub Actions 整点高峰
   workflow_dispatch:
 
 permissions:
@@ -31,9 +31,9 @@ jobs:
 
       - name: 运行奶昔论坛签到脚本
         env:
-          NAIXI_COOKIE: ${{ vars.NAIXI_COOKIE || secrets.NAIXI_COOKIE }}
+          NAIXI_COOKIE: ${{ secrets.NAIXI_COOKIE || vars.NAIXI_COOKIE }}
           # 可选：如果自动提取 formhash 失败，再手动配置这个
-          NAIXI_FORMHASH: ${{ vars.NAIXI_FORMHASH || secrets.NAIXI_FORMHASH }}
+          NAIXI_FORMHASH: ${{ secrets.NAIXI_FORMHASH || vars.NAIXI_FORMHASH }}
 
           # 复用原项目 notify.py 的 Telegram 推送配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

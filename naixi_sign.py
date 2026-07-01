@@ -5,6 +5,7 @@ import sys
 import html
 import time
 import random
+import hashlib
 import xml.etree.ElementTree as ET
 
 import requests
@@ -41,6 +42,10 @@ RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 def get_env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     return value.strip() if value else default
+
+
+def cookie_fingerprint(cookie_raw: str) -> str:
+    return hashlib.sha256(cookie_raw.encode("utf-8")).hexdigest()[:12]
 
 
 def load_notify():
@@ -478,6 +483,8 @@ def main():
                 print(f"发送通知失败: {e}")
 
         sys.exit(1)
+
+    print(f"使用 Cookie 指纹: {cookie_fingerprint(cookie_raw)}，账号数: {len(cookies)}")
 
     results = []
     ok_count = 0
