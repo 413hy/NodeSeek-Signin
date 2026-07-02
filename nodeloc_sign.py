@@ -70,6 +70,92 @@ def load_notify() -> Callable[[str, str], None] | None:
         return None
 
 
+def github_token() -> str:
+    return get_env("GH_PAT") or get_env("GITHUB_TOKEN")
+
+
+def save_cookie_to_github_secret(secret_name: str, cookie: str) -> bool:
+    token = github_token()
+    repo = get_env("GITHUB_REPOSITORY")
+    if not token or not repo:
+        print("GH_PAT/GITHUB_TOKEN 或 GITHUB_REPOSITORY 未设置，跳过 GitHub Secret 更新")
+        return False
+
+    try:
+        from nacl import encoding, public
+    except Exception as e:
+        print(f"PyNaCl 不可用，无法更新 GitHub Secret: {e}")
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    key_url = f"https://api.github.com/repos/{repo}/actions/secrets/public-key"
+    key_response = requests.get(key_url, headers=headers, timeout=30)
+    if key_response.status_code != 200:
+        print(f"获取 GitHub Secret 公钥失败: {key_response.status_code}, {key_response.text}")
+        return False
+
+    key_data = key_response.json()
+    public_key = public.PublicKey(key_data["key"].encode("utf-8"), encoding.Base64Encoder())
+    sealed_box = public.SealedBox(public_key)
+    encrypted_value = sealed_box.encrypt(cookie.encode("utf-8"), encoder=encoding.Base64Encoder()).decode("utf-8")
+
+    secret_url = f"https://api.github.com/repos/{repo}/actions/secrets/{secret_name}"
+    payload = {"encrypted_value": encrypted_value, "key_id": key_data["key_id"]}
+    response = requests.put(secret_url, headers=headers, json=payload, timeout=30)
+    if response.status_code in (201, 204):
+        print(f"GitHub Secret: {secret_name} 更新成功")
+        return True
+
+    print(f"GitHub Secret 更新失败: {response.status_code}, {response.text}")
+    return False
+
+
+def save_cookie_to_github_var(var_name: str, cookie: str) -> bool:
+    token = github_token()
+    repo = get_env("GITHUB_REPOSITORY")
+    if not token or not repo:
+        print("GH_PAT/GITHUB_TOKEN 或 GITHUB_REPOSITORY 未设置，跳过 GitHub 变量更新")
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    data = {"name": var_name, "value": cookie}
+
+    check_url = f"https://api.github.com/repos/{repo}/actions/variables/{var_name}"
+    create_url = f"https://api.github.com/repos/{repo}/actions/variables"
+    response = requests.patch(check_url, headers=headers, json=data, timeout=30)
+    if response.status_code == 204:
+        print(f"GitHub 变量: {var_name} 更新成功")
+        return True
+
+    if response.status_code == 404:
+        response = requests.post(create_url, headers=headers, json=data, timeout=30)
+        if response.status_code == 201:
+            print(f"GitHub 变量: {var_name} 创建成功")
+            return True
+
+    print(f"GitHub 变量更新失败: {response.status_code}, {response.text}")
+    return False
+
+
+def save_refreshed_cookie(cookie: str) -> bool:
+    if not cookie:
+        print("刷新后的 Cookie 为空，跳过保存")
+        return False
+
+    secret_ok = save_cookie_to_github_secret("NODELOC_COOKIE", cookie)
+    var_ok = save_cookie_to_github_var("NODELOC_COOKIE", cookie)
+    return secret_ok or var_ok
+
+
 def split_cookies(cookie_raw: str) -> list[str]:
     cookies = []
 
@@ -231,6 +317,37 @@ def inject_cookies(driver, cookie_header: str) -> int:
                 continue
 
     return injected
+
+
+def export_browser_cookie(driver, fallback_cookie: str) -> str:
+    try:
+        browser_cookies = driver.get_cookies()
+    except Exception as e:
+        print(f"读取浏览器 Cookie 失败，保留原 Cookie: {e}")
+        return fallback_cookie
+
+    cookie_map = {}
+    for item in browser_cookies:
+        domain = item.get("domain") or ""
+        name = item.get("name")
+        value = item.get("value")
+        if name and value is not None and "nodeloc.com" in domain:
+            cookie_map[name] = value
+
+    if not cookie_map:
+        return fallback_cookie
+
+    original_order = [name for name, _value in parse_cookie_header(fallback_cookie)]
+    ordered_names = []
+    for name in original_order:
+        if name in cookie_map and name not in ordered_names:
+            ordered_names.append(name)
+
+    for name in cookie_map:
+        if name not in ordered_names:
+            ordered_names.append(name)
+
+    return "; ".join(f"{name}={cookie_map[name]}" for name in ordered_names)
 
 
 def wait_login_success(driver, timeout: int = 20) -> bool:
@@ -470,13 +587,19 @@ def find_checkin_button(driver):
     )
 
 
-def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
+def sign_one(cookie: str, index: int = 1) -> tuple[str, str, str]:
     driver = None
 
     try:
+        def failed(message: str) -> tuple[str, str, str]:
+            return "failed", message, ""
+
+        def finished(status: str, message: str) -> tuple[str, str, str]:
+            return status, message, export_browser_cookie(driver, cookie) if driver else cookie
+
         parsed_cookies = parse_cookie_header(cookie)
         if not parsed_cookies:
-            return "failed", f"账号{index}: Cookie 为空或格式不正确"
+            return failed(f"账号{index}: Cookie 为空或格式不正确")
 
         cookie_valid, cookie_username, cookie_session_detail = check_cookie_session(cookie)
         print(f"账号{index}: Cookie 预检结果: {cookie_session_detail}", flush=True)
@@ -484,7 +607,7 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
         driver = create_browser()
         injected_count = inject_cookies(driver, cookie)
         if injected_count <= 0:
-            return "failed", f"账号{index}: Cookie 注入失败"
+            return failed(f"账号{index}: Cookie 注入失败")
 
         last_login_detail = ""
         logged_in = False
@@ -498,12 +621,12 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 
             if page_requires_login(driver):
                 if cookie_valid:
-                    return "failed", (
+                    return failed(
                         f"账号{index}({cookie_username}): Cookie 预检有效，但浏览器页面显示登录按钮，"
                         f"{last_login_detail}，{describe_page(driver)}"
                     )
 
-                return "failed", (
+                return failed(
                     f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
                     f"{last_login_detail}，{describe_page(driver)}"
                 )
@@ -517,24 +640,24 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 
         if not logged_in:
             if cookie_valid:
-                return "failed", (
+                return failed(
                     f"账号{index}({cookie_username}): Cookie 预检有效，但浏览器未能确认登录态，"
                     f"{last_login_detail}，{describe_page(driver)}"
                 )
 
-            return "failed", (
+            return failed(
                 f"账号{index}: 未能确认登录态，不直接判定 Cookie 失效，"
                 f"{last_login_detail}，{describe_page(driver)}"
             )
 
         if page_requires_login(driver):
             if cookie_valid:
-                return "failed", (
+                return failed(
                     f"账号{index}({cookie_username}): Cookie 预检有效，但页面显示登录按钮，"
                     f"{describe_page(driver)}"
                 )
 
-            return "failed", (
+            return failed(
                 f"账号{index}: Cookie 已失效或未登录，页面显示登录按钮，"
                 f"{describe_page(driver)}"
             )
@@ -546,24 +669,24 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
         state_result = classify_checkin_state(get_checkin_state(driver), clicked=False)
         if state_result:
             status, text = state_result
-            return status, f"账号{index}({username}): {text}"
+            return finished(status, f"账号{index}({username}): {text}")
 
         try:
             button = find_checkin_button(driver)
         except TimeoutException:
             if page_requires_login(driver):
-                return "failed", f"账号{index}({username}): Cookie 已失效或未登录，页面要求登录"
-            return "failed", f"账号{index}({username}): 未找到签到按钮"
+                return failed(f"账号{index}({username}): Cookie 已失效或未登录，页面要求登录")
+            return failed(f"账号{index}({username}): 未找到签到按钮")
 
         hint_text = hover_checkin(driver, button)
         if ALREADY_SIGNED_TOOLTIP in hint_text or "已经签到过了" in hint_text:
-            return "already", f"账号{index}({username}): NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}"
+            return finished("already", f"账号{index}({username}): NodeLoc 今日已签到，{ALREADY_SIGNED_TOOLTIP}")
 
         if has_blocked_text(hint_text):
-            return "failed", f"账号{index}({username}): NodeLoc 签到失败，页面提示: {hint_text}"
+            return failed(f"账号{index}({username}): NodeLoc 签到失败，页面提示: {hint_text}")
 
         if already_checked_in(button):
-            return "already", f"账号{index}({username}): NodeLoc 今日已签到"
+            return finished("already", f"账号{index}({username}): NodeLoc 今日已签到")
 
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", button)
         time.sleep(1)
@@ -572,20 +695,20 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
 
         status_text = collect_page_status_text(driver)
         if has_blocked_text(status_text):
-            return "failed", f"账号{index}({username}): NodeLoc 签到失败，页面提示: {status_text}"
+            return failed(f"账号{index}({username}): NodeLoc 签到失败，页面提示: {status_text}")
 
         state_result = classify_checkin_state(get_checkin_state(driver), clicked=True)
         if state_result:
             status, text = state_result
-            return status, f"账号{index}({username}): {text}"
+            return finished(status, f"账号{index}({username}): {text}")
 
         try:
             button = find_checkin_button(driver)
             after_hint = hover_checkin(driver, button)
             if ALREADY_SIGNED_TOOLTIP in after_hint or "已经签到过了" in after_hint:
-                return "success", f"账号{index}({username}): NodeLoc 签到成功，已显示今日已签到"
+                return finished("success", f"账号{index}({username}): NodeLoc 签到成功，已显示今日已签到")
             if already_checked_in(button):
-                return "success", f"账号{index}({username}): NodeLoc 签到成功"
+                return finished("success", f"账号{index}({username}): NodeLoc 签到成功")
         except Exception:
             pass
 
@@ -593,19 +716,19 @@ def sign_one(cookie: str, index: int = 1) -> tuple[str, str]:
         time.sleep(5)
 
         if page_requires_login(driver):
-            return "failed", f"账号{index}({username}): Cookie 已失效或未登录，刷新后页面要求登录"
+            return failed(f"账号{index}({username}): Cookie 已失效或未登录，刷新后页面要求登录")
 
         state_result = classify_checkin_state(get_checkin_state(driver), clicked=True)
         if state_result:
             status, text = state_result
-            return status, f"账号{index}({username}): {text}"
+            return finished(status, f"账号{index}({username}): {text}")
 
         detail = status_text or "页面没有返回成功、已签到或失败提示"
-        return "failed", f"账号{index}({username}): 已点击签到按钮，但未确认签到成功，页面提示: {detail}"
+        return failed(f"账号{index}({username}): 已点击签到按钮，但未确认签到成功，页面提示: {detail}")
     except TimeoutException:
-        return "failed", f"账号{index}: NodeLoc 页面加载或按钮等待超时，可能 Cookie 失效或页面未登录"
+        return "failed", f"账号{index}: NodeLoc 页面加载或按钮等待超时，可能 Cookie 失效或页面未登录", ""
     except Exception as e:
-        return "failed", f"账号{index}: NodeLoc 签到异常: {e}"
+        return "failed", f"账号{index}: NodeLoc 签到异常: {e}", ""
     finally:
         if driver:
             try:
@@ -646,18 +769,25 @@ def main():
     success_count = 0
     already_count = 0
     failed_count = 0
+    refreshed_cookies = []
+    cookies_updated = False
 
     for index, cookie in enumerate(cookies, start=1):
-        status, message = sign_one(cookie, index)
+        status, message, refreshed_cookie = sign_one(cookie, index)
         print(message)
         results.append(message)
 
         if status == "success":
             success_count += 1
+            refreshed_cookies.append(refreshed_cookie or cookie)
+            cookies_updated = True
         elif status == "already":
             already_count += 1
+            refreshed_cookies.append(refreshed_cookie or cookie)
+            cookies_updated = True
         else:
             failed_count += 1
+            refreshed_cookies.append(cookie)
 
         if index < len(cookies):
             time.sleep(5)
@@ -674,6 +804,15 @@ def main():
             send(title, summary)
         except Exception as e:
             print(f"发送通知失败: {e}")
+
+    if cookies_updated:
+        refreshed_cookie_raw = "&".join(cookie for cookie in refreshed_cookies if cookie.strip())
+        if refreshed_cookie_raw and cookie_fingerprint(refreshed_cookie_raw) != fingerprint:
+            print(f"检测到 Cookie 已刷新，新指纹: {cookie_fingerprint(refreshed_cookie_raw)}")
+        if save_refreshed_cookie(refreshed_cookie_raw):
+            print("NodeLoc Cookie 已写回 GitHub，后续运行将使用刷新后的 Cookie")
+        else:
+            print("NodeLoc Cookie 写回 GitHub 失败，请检查 GH_PAT 权限")
 
     if failed_count > 0:
         sys.exit(1)

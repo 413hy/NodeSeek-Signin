@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   run-nodeloc-sign:
@@ -33,6 +34,9 @@ jobs:
       - name: 运行 NodeLoc 签到脚本
         env:
           NODELOC_COOKIE: ${{ secrets.NODELOC_COOKIE || secrets.NL_COOKIE || vars.NODELOC_COOKIE || vars.NL_COOKIE }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
 
           # 复用原项目 notify.py 的 Telegram 推送配置
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
