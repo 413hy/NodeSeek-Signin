@@ -5,7 +5,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '20 2 * * *'  # 北京时间 10:20 (UTC+8)，错开 GitHub Actions 整点高峰
+    - cron: '00 17 * * *'  # 北京时间 10:20 (UTC+8)，错开 GitHub Actions 整点高峰
   workflow_dispatch:
 
 permissions:
