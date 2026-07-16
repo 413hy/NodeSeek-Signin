@@ -41,7 +41,7 @@ DIGIT_CLASS_MAP = {
     "nine": "9",
 }
 
-RETRY_STATUS_CODES = {403, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
 def get_env(name: str, default: str = "") -> str:
@@ -68,16 +68,18 @@ def request_with_retry(
     *,
     retries: int = 6,
     timeout: int = 30,
+    retry_status_codes: set[int] | None = None,
     **kwargs,
 ) -> requests.Response:
     last_response = None
     last_error = None
+    retry_status_codes = retry_status_codes or RETRY_STATUS_CODES
 
     for attempt in range(1, retries + 1):
         try:
             response = session.request(method, url, timeout=timeout, **kwargs)
             last_response = response
-            if response.status_code not in RETRY_STATUS_CODES:
+            if response.status_code not in retry_status_codes:
                 return response
 
             if attempt < retries:
@@ -456,7 +458,13 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
         "Sec-Fetch-Site": "same-origin",
         "Referer": SIGN_PAGE,
     }
-    resp = request_with_retry(session, "GET", sign_url, headers=ajax_headers)
+    resp = request_with_retry(
+        session,
+        "GET",
+        sign_url,
+        headers=ajax_headers,
+        retry_status_codes=RETRY_STATUS_CODES | {403},
+    )
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
 
     try:
