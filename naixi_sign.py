@@ -292,16 +292,13 @@ def get_formhash(session: requests.Session) -> str:
         match = SIGN_URL_PATTERN.match(env_sign_url)
         if not match:
             raise RuntimeError("NAIXI_SIGN_URL 格式不正确，请填写完整奶昔签到 URL")
+        print("使用 NAIXI_SIGN_URL 中配置的 formhash", flush=True)
         return match.group(1)
 
     env_formhash = get_env("NAIXI_FORMHASH")
     if env_formhash:
+        print("使用 NAIXI_FORMHASH 中配置的 formhash", flush=True)
         return env_formhash
-
-    resp = request_with_retry(session, "GET", SIGN_PAGE)
-    resp.raise_for_status()
-
-    page_text = resp.text
 
     patterns = [
         r"formhash=([a-fA-F0-9]{8})",
@@ -310,12 +307,34 @@ def get_formhash(session: requests.Session) -> str:
         r"formhash['\"]?\s*[:=]\s*['\"]([a-fA-F0-9]{8})",
     ]
 
-    for pattern in patterns:
-        match = re.search(pattern, page_text)
-        if match:
-            return match.group(1)
+    sources = [
+        ("论坛首页", f"{BASE_URL}/"),
+        ("总积分页", CREDIT_PAGE),
+        ("签到页", SIGN_PAGE),
+    ]
+    source_errors = []
 
-    raise RuntimeError("未能从签到页提取 formhash，请手动配置 NAIXI_FORMHASH")
+    for source_name, source_url in sources:
+        try:
+            resp = request_with_retry(session, "GET", source_url)
+            if resp.status_code != 200:
+                source_errors.append(f"{source_name}=HTTP {resp.status_code}")
+                continue
+
+            for pattern in patterns:
+                match = re.search(pattern, resp.text)
+                if match:
+                    print(f"已从{source_name}提取 formhash", flush=True)
+                    return match.group(1)
+
+            source_errors.append(f"{source_name}=未找到 formhash")
+        except Exception as e:
+            source_errors.append(f"{source_name}={e}")
+
+    details = "；".join(source_errors)
+    raise RuntimeError(
+        f"未能自动提取 formhash（{details}），请配置 NAIXI_SIGN_URL 或 NAIXI_FORMHASH"
+    )
 
 
 def get_sign_url(formhash: str) -> str:
