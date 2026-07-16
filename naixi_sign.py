@@ -20,9 +20,11 @@ SIGN_API = (
     "&operation=qiandao"
     "&formhash={formhash}"
     "&format=empty"
+    "&inajax=1"
+    "&ajaxtarget="
 )
 SIGN_URL_PATTERN = re.compile(
-    r"^https://forum\.naixi\.net/plugin\.php\?id=k_misign:sign&operation=qiandao&formhash=([a-fA-F0-9]{8})&format=empty$"
+    r"^https://forum\.naixi\.net/plugin\.php\?id=k_misign:sign&operation=qiandao&formhash=([a-fA-F0-9]{8})&format=empty(?:&inajax=1&ajaxtarget=)?$"
 )
 
 
