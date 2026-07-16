@@ -21,6 +21,9 @@ SIGN_API = (
     "&formhash={formhash}"
     "&format=empty"
 )
+SIGN_URL_PATTERN = re.compile(
+    r"^https://forum\.naixi\.net/plugin\.php\?id=k_misign:sign&operation=qiandao&formhash=([a-fA-F0-9]{8})&format=empty$"
+)
 
 
 DIGIT_CLASS_MAP = {
@@ -282,6 +285,13 @@ def get_total_credit(session: requests.Session) -> str:
 
 
 def get_formhash(session: requests.Session) -> str:
+    env_sign_url = get_env("NAIXI_SIGN_URL")
+    if env_sign_url:
+        match = SIGN_URL_PATTERN.match(env_sign_url)
+        if not match:
+            raise RuntimeError("NAIXI_SIGN_URL 格式不正确，请填写完整奶昔签到 URL")
+        return match.group(1)
+
     env_formhash = get_env("NAIXI_FORMHASH")
     if env_formhash:
         return env_formhash
@@ -408,7 +418,7 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     session.headers.update(headers)
 
     formhash = get_formhash(session)
-    sign_url = SIGN_API.format(formhash=formhash)
+    sign_url = get_env("NAIXI_SIGN_URL") or SIGN_API.format(formhash=formhash)
 
     resp = request_with_retry(session, "GET", sign_url)
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
