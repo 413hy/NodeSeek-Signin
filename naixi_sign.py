@@ -318,6 +318,13 @@ def get_formhash(session: requests.Session) -> str:
     raise RuntimeError("未能从签到页提取 formhash，请手动配置 NAIXI_FORMHASH")
 
 
+def get_sign_url(formhash: str) -> str:
+    sign_url = get_env("NAIXI_SIGN_URL") or SIGN_API.format(formhash=formhash)
+    if "&inajax=" not in sign_url:
+        sign_url += "&inajax=1&ajaxtarget="
+    return sign_url
+
+
 def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[bool, str]:
     cleaned_text = extract_cdata_or_text(raw_text)
 
@@ -420,7 +427,7 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     session.headers.update(headers)
 
     formhash = get_formhash(session)
-    sign_url = get_env("NAIXI_SIGN_URL") or SIGN_API.format(formhash=formhash)
+    sign_url = get_sign_url(formhash)
 
     resp = request_with_retry(session, "GET", sign_url)
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
