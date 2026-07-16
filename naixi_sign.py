@@ -41,7 +41,7 @@ DIGIT_CLASS_MAP = {
     "nine": "9",
 }
 
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+RETRY_STATUS_CODES = {403, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
 def get_env(name: str, default: str = "") -> str:
@@ -448,7 +448,15 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
     formhash = get_formhash(session)
     sign_url = get_sign_url(formhash)
 
-    resp = request_with_retry(session, "GET", sign_url)
+    ajax_headers = {
+        "Accept": "application/xml, text/xml, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Referer": SIGN_PAGE,
+    }
+    resp = request_with_retry(session, "GET", sign_url, headers=ajax_headers)
     ok, message = classify_sign_result(resp.status_code, resp.text, index)
 
     try:
