@@ -33,7 +33,7 @@ jobs:
         env:
           NAIXI_COOKIE: ${{ secrets.NAIXI_COOKIE || vars.NAIXI_COOKIE }}
           # 可选：如果签到页被 403 拦截，可直接配置完整签到 URL
-          NAIXI_SIGN_URL: ${{ secrets.NAIXI_SIGN_URL || vars.NAIXI_SIGN_URL }}
+          NAIXI_SIGN_URL: ${{ secrets.NAIXI_SIGN_URL || vars.NAIXI_SIGN_URL || 'https://forum.naixi.net/plugin.php?id=k_misign:sign&operation=qiandao&formhash=58451330&format=empty&inajax=1&ajaxtarget=' }}
           # 可选：如果自动提取 formhash 失败，再手动配置这个
           NAIXI_FORMHASH: ${{ secrets.NAIXI_FORMHASH || vars.NAIXI_FORMHASH }}
 
