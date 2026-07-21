@@ -381,16 +381,15 @@ def resolve_sign_url(session: requests.Session) -> str:
     else:
         button_url = extract_sign_button_url(resp.text)
         if "member.php?mod=logging" in button_url:
-            raise RuntimeError("Cookie 已失效，签到页中的签到按钮已变成登录按钮")
-
-        if button_url and "id=k_misign:sign" in button_url:
+            page_error = "签到页显示登录按钮"
+        elif button_url and "id=k_misign:sign" in button_url:
             sign_url = urljoin(f"{BASE_URL}/", button_url)
             if "&inajax=" not in sign_url:
                 sign_url += "&inajax=1&ajaxtarget="
             print("已从签到页 #JD_sign 读取签到地址", flush=True)
             return sign_url
-
-        page_error = "签到页中未找到可用的 #JD_sign 签到地址"
+        else:
+            page_error = "签到页中未找到可用的 #JD_sign 签到地址"
 
     if get_env("NAIXI_SIGN_URL") or get_env("NAIXI_FORMHASH"):
         print(f"{page_error}，改用手动配置的签到地址", flush=True)
