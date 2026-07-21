@@ -9,7 +9,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 
-import requests
+from curl_cffi import requests
 
 
 BASE_URL = "https://forum.naixi.net"
@@ -97,7 +97,7 @@ def request_with_retry(
                 f"请求 {url} 连续 {retries} 次返回 HTTP {response.status_code}，"
                 "目标站或 CDN 当前不稳定"
             )
-        except requests.RequestException as e:
+        except requests.RequestsError as e:
             last_error = e
             if attempt < retries:
                 wait_seconds = min(12 * attempt, 60) + random.randint(0, 5)
@@ -477,19 +477,11 @@ def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[b
 
 
 def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
-    session = requests.Session()
+    session = requests.Session(impersonate="chrome")
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
         "Pragma": "no-cache",
     }
     session.headers.update(headers)
