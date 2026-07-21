@@ -289,6 +289,22 @@ def get_total_credit(session: requests.Session) -> str:
     return extract_total_credit_from_credit_page(resp.text)
 
 
+def extract_formhash(page_text: str) -> str:
+    patterns = [
+        r"formhash=([a-fA-F0-9]{8})",
+        r"name=['\"]formhash['\"]\s+value=['\"]([a-fA-F0-9]{8})['\"]",
+        r"value=['\"]([a-fA-F0-9]{8})['\"]\s+name=['\"]formhash['\"]",
+        r"formhash['\"]?\s*[:=]\s*['\"]([a-fA-F0-9]{8})",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, page_text)
+        if match:
+            return match.group(1)
+
+    return ""
+
+
 def get_formhash(session: requests.Session) -> str:
     env_sign_url = get_env("NAIXI_SIGN_URL")
     if env_sign_url:
@@ -302,13 +318,6 @@ def get_formhash(session: requests.Session) -> str:
     if env_formhash:
         print("使用 NAIXI_FORMHASH 中配置的 formhash", flush=True)
         return env_formhash
-
-    patterns = [
-        r"formhash=([a-fA-F0-9]{8})",
-        r"name=['\"]formhash['\"]\s+value=['\"]([a-fA-F0-9]{8})['\"]",
-        r"value=['\"]([a-fA-F0-9]{8})['\"]\s+name=['\"]formhash['\"]",
-        r"formhash['\"]?\s*[:=]\s*['\"]([a-fA-F0-9]{8})",
-    ]
 
     sources = [
         ("论坛首页", f"{BASE_URL}/"),
@@ -324,11 +333,10 @@ def get_formhash(session: requests.Session) -> str:
                 source_errors.append(f"{source_name}=HTTP {resp.status_code}")
                 continue
 
-            for pattern in patterns:
-                match = re.search(pattern, resp.text)
-                if match:
-                    print(f"已从{source_name}提取 formhash", flush=True)
-                    return match.group(1)
+            formhash = extract_formhash(resp.text)
+            if formhash:
+                print(f"已从{source_name}提取 formhash", flush=True)
+                return formhash
 
             source_errors.append(f"{source_name}=未找到 formhash")
         except Exception as e:
@@ -404,6 +412,10 @@ def resolve_sign_url(session: requests.Session) -> str:
             print("已从签到页 #JD_sign 读取签到地址", flush=True)
             return sign_url
         else:
+            page_formhash = extract_formhash(resp.text)
+            if page_formhash:
+                print("签到按钮不可用，已从签到页读取当前 formhash", flush=True)
+                return SIGN_API.format(formhash=page_formhash)
             page_error = "签到页中未找到可用的 #JD_sign 签到地址"
 
     if get_env("NAIXI_SIGN_URL") or get_env("NAIXI_FORMHASH"):
