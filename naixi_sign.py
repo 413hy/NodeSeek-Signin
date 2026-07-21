@@ -7,6 +7,7 @@ import time
 import random
 import hashlib
 import xml.etree.ElementTree as ET
+from urllib.parse import urljoin
 
 import requests
 
@@ -346,6 +347,58 @@ def get_sign_url(formhash: str) -> str:
     return sign_url
 
 
+def load_session_cookies(session: requests.Session, cookie: str) -> None:
+    loaded = 0
+    for item in cookie.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if not separator or not name:
+            continue
+        session.cookies.set(name, value, domain=".naixi.net", path="/")
+        loaded += 1
+
+    if loaded == 0:
+        raise RuntimeError("Cookie 格式不正确，未解析到任何 Cookie 字段")
+
+
+def extract_sign_button_url(page_text: str) -> str:
+    for anchor in re.findall(r"<a\b[^>]*>", page_text, flags=re.S | re.I):
+        if not re.search(r"\bid=['\"]JD_sign['\"]", anchor, flags=re.I):
+            continue
+
+        href_match = re.search(r"\bhref=['\"]([^'\"]+)['\"]", anchor, flags=re.I)
+        if href_match:
+            return html.unescape(href_match.group(1)).strip()
+
+    return ""
+
+
+def resolve_sign_url(session: requests.Session) -> str:
+    try:
+        resp = request_with_retry(session, "GET", SIGN_PAGE)
+        resp.raise_for_status()
+    except Exception as e:
+        page_error = f"加载签到页失败: {e}"
+    else:
+        button_url = extract_sign_button_url(resp.text)
+        if "member.php?mod=logging" in button_url:
+            raise RuntimeError("Cookie 已失效，签到页中的签到按钮已变成登录按钮")
+
+        if button_url and "id=k_misign:sign" in button_url:
+            sign_url = urljoin(f"{BASE_URL}/", button_url)
+            if "&inajax=" not in sign_url:
+                sign_url += "&inajax=1&ajaxtarget="
+            print("已从签到页 #JD_sign 读取签到地址", flush=True)
+            return sign_url
+
+        page_error = "签到页中未找到可用的 #JD_sign 签到地址"
+
+    if get_env("NAIXI_SIGN_URL") or get_env("NAIXI_FORMHASH"):
+        print(f"{page_error}，改用手动配置的签到地址", flush=True)
+        return get_sign_url(get_formhash(session))
+
+    raise RuntimeError(page_error)
+
+
 def classify_sign_result(status_code: int, raw_text: str, index: int) -> tuple[bool, str]:
     cleaned_text = extract_cdata_or_text(raw_text)
 
@@ -438,24 +491,14 @@ def sign_one(cookie: str, index: int = 1) -> tuple[bool, str]:
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "Pragma": "no-cache",
-        "Referer": SIGN_PAGE,
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Upgrade-Insecure-Requests": "1",
-        "Cookie": cookie,
     }
     session.headers.update(headers)
+    load_session_cookies(session, cookie)
 
-    formhash = get_formhash(session)
-    sign_url = get_sign_url(formhash)
+    sign_url = resolve_sign_url(session)
 
     ajax_headers = {
-        "Accept": "application/xml, text/xml, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
+        "Accept": "*/*",
         "Referer": SIGN_PAGE,
     }
     resp = request_with_retry(
