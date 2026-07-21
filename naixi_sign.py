@@ -348,16 +348,31 @@ def get_sign_url(formhash: str) -> str:
 
 
 def load_session_cookies(session: requests.Session, cookie: str) -> None:
-    loaded = 0
+    cookie_pairs = []
     for item in cookie.split(";"):
         name, separator, value = item.strip().partition("=")
         if not separator or not name:
             continue
-        session.cookies.set(name, value, domain=".naixi.net", path="/")
-        loaded += 1
+        cookie_pairs.append((name, value))
 
-    if loaded == 0:
+    if not cookie_pairs:
         raise RuntimeError("Cookie 格式不正确，未解析到任何 Cookie 字段")
+
+    cookie_names = {name for name, _ in cookie_pairs}
+    has_auth = any(re.fullmatch(r"naixi_[^;\s]+_auth", name) for name in cookie_names)
+    has_saltkey = any(
+        re.fullmatch(r"naixi_[^;\s]+_saltkey", name) for name in cookie_names
+    )
+    if not has_auth or not has_saltkey:
+        raise RuntimeError(
+            "NAIXI_COOKIE 不是有效的奶昔论坛 Cookie，"
+            "缺少 naixi_*_auth 或 naixi_*_saltkey"
+        )
+
+    allowed_names = {"X_CACHE_KEY", "cf_clearance", "__cf_bm"}
+    for name, value in cookie_pairs:
+        if name.startswith("naixi_") or name in allowed_names:
+            session.cookies.set(name, value, domain=".naixi.net", path="/")
 
 
 def extract_sign_button_url(page_text: str) -> str:
